@@ -6,14 +6,20 @@ Built with **PySide6 (Qt 6)** and installed as a small Python package so you can
 
 ---
 
-## What it does
+## Preview
+
+![StickOn canvas with mixed reference images and notes](assets/preview-main.png)
+
+---
+
+## Features
 
 - **Images as first-class citizens** — Drag files from Explorer or paste from the clipboard (`Ctrl+V`: bitmap or a file path). GIFs animate; corner handles resize; crops, rotate, scale, and flip gestures stay on the canvas.
 - **Notes** — Add notes with `Ctrl+N`, double-click empty canvas to place one under the pointer, or edit inline by double-clicking a note. Resize handles scale text with the card.
 - **Layout helpers** — Pack images into the viewport, align selections, and group nodes when you need them to move together.
 - **Window that behaves like a tool** — Always on top or bottom, adjustable opacity, optional **click-through** (`Ctrl+T`) so you can see through to apps underneath (Windows uses precise hit-testing so the title bar and resize rim stay clickable).
 - **Session memory** — Closing saves layout: window position and size, zoom/view state when configured, and each node’s transforms. Reopening restores your last board (`StickOn — last session`).
-- **Command palette** — `Ctrl+Shift+P` opens **Command Key** for discoverable actions and shortcuts.
+- **Command palette** — `Ctrl+Shift+P` opens the command palette for discoverable actions and shortcuts.
 
 Drawing mode, scene export, undo/redo, and GIF playback controls round out the workflow for quick visual references—not a full image editor, but a fast overlay for design, 3D, coding, or teaching side-by-side with another window.
 
