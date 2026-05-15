@@ -47,3 +47,6 @@ Thumbs.db
 secrets.*
 *_secret*
 *_token*
+
+# Local-only docs
+sample.md
