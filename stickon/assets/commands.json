@@ -1,0 +1,30 @@
+{
+  "commands": [
+    {"id": "palette.open", "title": "Command Key", "shortcut": "Ctrl+Shift+P", "enabled_when": "always"},
+    {"id": "window.always_on_top", "title": "Always on Top", "shortcut": "Ctrl+Shift+A", "enabled_when": "always"},
+    {"id": "window.always_on_bottom", "title": "Always on Bottom", "shortcut": "Ctrl+Shift+B", "enabled_when": "always"},
+    {"id": "window.click_through", "title": "Transparent to Mouse", "shortcut": "Ctrl+T", "enabled_when": "always"},
+    {"id": "window.opacity_up", "title": "Opacity Up (Ctrl+wheel up)", "shortcut": "Ctrl+Shift++", "enabled_when": "always"},
+    {"id": "window.opacity_down", "title": "Opacity Down (Ctrl+wheel down)", "shortcut": "Ctrl+Shift+-", "enabled_when": "always"},
+    {"id": "window.lock", "title": "Lock Window Position", "shortcut": "Ctrl+W", "enabled_when": "always"},
+    {"id": "window.click_through_off", "title": "Disable Click-Through (recover)", "shortcut": "Escape", "enabled_when": "always"},
+    {"id": "window.fit_content", "title": "Fit Window to Content", "shortcut": "Ctrl+Shift+F", "enabled_when": "always"},
+    {"id": "layout.pack", "title": "Pack Optimal", "shortcut": "Ctrl+P", "enabled_when": "always"},
+    {"id": "layout.layers", "title": "Layers", "shortcut": "", "enabled_when": "always"},
+    {"id": "edit.select_all", "title": "Select All", "shortcut": "Ctrl+A", "enabled_when": "always"},
+    {"id": "layout.align_left", "title": "Align Left", "shortcut": "Ctrl+Left", "enabled_when": "has_selection"},
+    {"id": "layout.align_right", "title": "Align Right", "shortcut": "Ctrl+Right", "enabled_when": "has_selection"},
+    {"id": "layout.align_top", "title": "Align Top", "shortcut": "Ctrl+Up", "enabled_when": "has_selection"},
+    {"id": "layout.align_bottom", "title": "Align Bottom", "shortcut": "Ctrl+Down", "enabled_when": "has_selection"},
+    {"id": "node.group", "title": "Group Selection", "shortcut": "Ctrl+G", "enabled_when": "has_selection"},
+    {"id": "note.new", "title": "New Note", "shortcut": "Ctrl+N", "enabled_when": "always"},
+    {"id": "draw.toggle", "title": "Draw Mode", "shortcut": "Ctrl+Shift+D", "enabled_when": "always"},
+    {"id": "edit.undo", "title": "Undo", "shortcut": "Ctrl+Z", "enabled_when": "always"},
+    {"id": "edit.redo", "title": "Redo", "shortcut": "Ctrl+Shift+Z", "enabled_when": "always"},
+    {"id": "export.scene", "title": "Export Scene", "shortcut": "Ctrl+E", "enabled_when": "always"},
+    {"id": "gif.pause", "title": "GIF Pause Selected", "shortcut": "", "enabled_when": "has_selection"},
+    {"id": "gif.resume", "title": "GIF Resume Selected", "shortcut": "", "enabled_when": "has_selection"},
+    {"id": "gif.next_frame", "title": "GIF Next Frame", "shortcut": "", "enabled_when": "has_selection"},
+    {"id": "gif.prev_frame", "title": "GIF Prev Frame", "shortcut": "", "enabled_when": "has_selection"}
+  ]
+}

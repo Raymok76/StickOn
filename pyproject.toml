@@ -1,0 +1,26 @@
+[project]
+name = "stickon"
+version = "0.1.0"
+description = "StickOn — infinite-canvas reference board (PySide6)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PySide6>=6.6"]
+
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["stickon"]
+
+[tool.uv]
+package = true
+
+[project.scripts]
+stickon = "stickon.main:main"
+
+[dependency-groups]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
