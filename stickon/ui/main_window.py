@@ -16,12 +16,14 @@ from PySide6.QtCore import (
     QPointF,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QStandardPaths,
     Qt,
     QTimer,
 )
 from PySide6.QtGui import (
     QAction,
+    QBrush,
     QCloseEvent,
     QColor,
     QCursor,
@@ -32,6 +34,8 @@ from PySide6.QtGui import (
     QKeyEvent,
     QMovie,
     QMouseEvent,
+    QPainter,
+    QPixmap,
     QShowEvent,
     QTransform,
 )
@@ -39,10 +43,13 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
+    QGraphicsItem,
     QGraphicsView,
     QMainWindow,
     QMenu,
     QPushButton,
+    QStyle,
+    QStyleOptionGraphicsItem,
     QVBoxLayout,
     QWidget,
 )
@@ -59,15 +66,18 @@ from stickon.services.export_service import ExportService
 from stickon.services.layout_service import LayoutService
 from stickon.services.project_service import load_scene_from_path, save_scene_to_path
 from stickon.services.session_service import autosession_path
-from stickon.ui.canvas_view import CanvasView
+from stickon.ui.canvas_view import CanvasView, _visual_item_bounds
 from stickon.ui.font_settings_dialog import FontSettingsDialog
 from stickon.ui.command_palette import (
     CommandPaletteDialog,
     RecordShortcutDialog,
     stored_shortcut_chord_only,
 )
+from stickon.ui.image_overlay_window import ImageOverlayWindow
 from stickon.ui.layers_dialog import LayersDialog
 from stickon.ui.title_bar import DraggableTitleBar, ToggleChipLabel, _BAR_BG, _CHIP_RADIUS
+
+_OVERLAY_SELECTION_TYPES = (ImageNodeItem, NoteNodeItem, DrawNodeItem)
 
 
 def _assets_commands_path() -> Path:
@@ -240,6 +250,10 @@ class MainWindow(QMainWindow):
         self._resize_edges = Qt.Edge(0)
         self._resize_start_geom = QRect()
         self._resize_press_global = QPoint()
+        self._saved_scene_background_brush: QBrush | None = None
+        self._saved_view_background_brush: QBrush | None = None
+        self._image_overlay_windows: list[ImageOverlayWindow] = []
+
         self._canvas.installEventFilter(self)
         self._canvas.viewport().installEventFilter(self)
         self._title_bar.installEventFilter(self)
@@ -279,6 +293,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._clickthrough_hover_timer.isActive():
             self._clickthrough_hover_timer.stop()
+        self._close_all_image_overlays()
         if sys.platform == "win32" and self._win_clickthrough_filter is not None:
             app_inst = QApplication.instance()
             if app_inst is not None:
@@ -655,6 +670,7 @@ class MainWindow(QMainWindow):
             lambda ctx: self._toggle_draw(),
             is_checked=lambda: self._canvas.draw_mode,
         )
+        reg("overlay.selection", lambda ctx: self._overlay_selection())
         reg("edit.undo", lambda ctx: self._history.undo())
         reg("edit.redo", lambda ctx: self._history.redo())
         reg("edit.select_all", lambda ctx: self._select_all())
@@ -1116,8 +1132,62 @@ class MainWindow(QMainWindow):
             if cid:
                 self._execute(cid)
 
+    def _purge_invisible_overlay_windows(self) -> None:
+        """Drop closed overlays from tracking; close() clears isVisible before destroyed fires."""
+        try:
+            before = list(self._image_overlay_windows)
+        except RuntimeError:
+            self._image_overlay_windows = []
+            return
+        survivors: list[ImageOverlayWindow] = []
+        for w in before:
+            try:
+                if w.isVisible():
+                    survivors.append(w)
+            except RuntimeError:
+                continue
+        self._image_overlay_windows = survivors
+
+    def _dismiss_image_overlays_with_ctrl_o_hotkey(self, event: QKeyEvent) -> bool:
+        if not self._image_overlay_windows:
+            return False
+        if event.key() != Qt.Key_O:
+            return False
+        m = event.modifiers()
+        if not (m & Qt.KeyboardModifier.ControlModifier):
+            return False
+        if m & (
+            Qt.KeyboardModifier.ShiftModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        ):
+            return False
+        self._close_all_image_overlays()
+        return True
+
+    def _refocus_canvas_after_overlay_spawn(self) -> None:
+        try:
+            self.raise_()
+            self.activateWindow()
+            self._canvas.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        except RuntimeError:
+            pass
+
     def _dispatch_main_shortcuts(self, event: QKeyEvent) -> bool:
+        self._purge_invisible_overlay_windows()
+        self._overlay_restore_canvas_background_if_idle()
         if self._dispatch_note_text_undo_redo(event):
+            return True
+
+        if (
+            event.key() == Qt.Key_Escape
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self._image_overlay_windows
+        ):
+            self._close_all_image_overlays()
+            return True
+
+        if self._dismiss_image_overlays_with_ctrl_o_hotkey(event):
             return True
 
         if (
@@ -1138,6 +1208,8 @@ class MainWindow(QMainWindow):
             self._execute("edit.redo")
             return True
         if event.key() == Qt.Key_V and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if self._scene_note_in_text_edit():
+                return False
             self._paste_clipboard()
             return True
         return False
@@ -1331,6 +1403,13 @@ class MainWindow(QMainWindow):
 
         self._history.push(HistoryEntry(do_redo=redo, undo=undo, label=f"delete {label or 'layer'}"))
 
+    def _scene_note_in_text_edit(self) -> bool:
+        fi = self._canvas.graphics_scene().focusItem()
+        return (
+            isinstance(fi, NoteNodeItem)
+            and fi.textInteractionFlags() != Qt.TextInteractionFlag.NoTextInteraction
+        )
+
     def _dispatch_note_text_undo_redo(self, event: QKeyEvent) -> bool:
         mods = event.modifiers()
         ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
@@ -1385,25 +1464,83 @@ class MainWindow(QMainWindow):
         if mime is None:
             return
         scene = self._canvas.graphics_scene()
+        before_scene_items = set(scene.items())
         pos = self._canvas.mapToScene(self._canvas.viewport().rect().center())
-        before = self._canvas.scene_image_count()
-        if mime.hasImage():
-            from PySide6.QtGui import QImage, QPixmap
+        self._canvas.apply_drop_mime(mime, pos, clipboard=cb)
+        pasted_images = [
+            it
+            for it in scene.items()
+            if isinstance(it, ImageNodeItem) and it not in before_scene_items
+        ]
+        if pasted_images:
+            self._push_paste_history(pasted_images, "paste image")
+            return
 
-            img = cb.image()
-            if not img.isNull():
-                pm = QPixmap.fromImage(img)
-                it = ImageNodeItem(pm, None)
-                it.setPos(pos)
-                scene.addItem(it)
-                self._canvas.finalize_new_images(before, [it])
-        elif mime.hasText():
-            t = mime.text().strip().strip('"')
-            p = Path(t)
-            if p.is_file():
-                it = self._canvas.add_image_from_path(str(p), pos)
-                if it is not None:
-                    self._canvas.finalize_new_images(before, [it])
+        if not mime.hasText():
+            return
+        text = mime.text()
+        if not text or not text.strip():
+            return
+        note = self._create_note_from_text(text, pos)
+        self._push_paste_history([note], "paste note")
+
+    def _create_note_from_text(self, text: str, pos: QPointF) -> NoteNodeItem:
+        scene = self._canvas.graphics_scene()
+        note = NoteNodeItem(text)
+        self._note_appearance_defaults.apply_to(note)
+        note.setPos(pos)
+        note.setZValue(self._next_topmost_z())
+        scene.clearSelection()
+        scene.addItem(note)
+        note.setSelected(True)
+        return note
+
+    def _push_paste_history(
+        self,
+        items: list[ImageNodeItem | NoteNodeItem],
+        label: str,
+    ) -> None:
+        scene = self._canvas.graphics_scene()
+        snapshot = [
+            (
+                it,
+                QPointF(it.pos()),
+                float(it.rotation()),
+                float(it.zValue()),
+                float(it.scale()),
+                QPointF(it.transformOriginPoint()),
+                QTransform(it.transform()),
+            )
+            for it in items
+        ]
+
+        def redo() -> None:
+            scene.clearSelection()
+            for it, pos, rot, z, sc, origin, tr in snapshot:
+                try:
+                    if it.scene() is None:
+                        scene.addItem(it)
+                    it.setTransformOriginPoint(origin)
+                    it.setScale(sc)
+                    it.setTransform(tr)
+                    it.setPos(pos)
+                    it.setRotation(rot)
+                    it.setZValue(z)
+                    it.setSelected(True)
+                except RuntimeError:
+                    continue
+
+        def undo() -> None:
+            for it, *_rest in snapshot:
+                try:
+                    if isinstance(it, NoteNodeItem):
+                        it.finalize_text_edit_visual()
+                    if it.scene() is scene:
+                        scene.removeItem(it)
+                except RuntimeError:
+                    continue
+
+        self._history.push(HistoryEntry(do_redo=redo, undo=undo, label=label))
 
     def _fit_new_image_into_viewport_slot(self, it: object) -> None:
         if isinstance(it, ImageNodeItem):
@@ -1417,6 +1554,9 @@ class MainWindow(QMainWindow):
         if self._global_title_bar_rect().contains(global_pos):
             return
         menu = QMenu(self)
+        has_overlay_candidate = any(
+            isinstance(x, _OVERLAY_SELECTION_TYPES) for x in self._selected_items()
+        )
         cmds = [c for c in self._registry.all() if c.id not in _CONTEXT_MENU_EXCLUDE_IDS]
         palette_cmd = next((c for c in cmds if c.id == "palette.open"), None)
         rest = [c for c in cmds if c.id != "palette.open"]
@@ -1471,6 +1611,8 @@ class MainWindow(QMainWindow):
             act = QAction(title, self)
             act.triggered.connect(lambda checked=False, cid=cmd.id: self._execute(cid))
             menu.addAction(act)
+            if cmd.id == "overlay.selection":
+                act.setEnabled(has_overlay_candidate)
             if cmd.id == "draw.toggle":
                 menu.addSeparator()
             if cmd.id == "note.new":
@@ -1635,6 +1777,252 @@ class MainWindow(QMainWindow):
 
     def _toggle_draw(self) -> None:
         self._canvas.draw_mode = not self._canvas.draw_mode
+
+    @staticmethod
+    def _overlay_item_local_paint_rect(it: QGraphicsItem) -> QRectF:
+        vb = QRectF(_visual_item_bounds(it))
+        if isinstance(it, DrawNodeItem):
+            ew = float(it.pen().widthF()) * 0.52 + 1.75
+            vb.adjust(-ew, -ew, ew, ew)
+        vb = vb.normalized()
+        if vb.width() < 1e-3:
+            vb.setWidth(1.0)
+        if vb.height() < 1e-3:
+            vb.setHeight(1.0)
+        return vb
+
+    @staticmethod
+    def _overlay_scene_geometry_rect(it: QGraphicsItem) -> QRectF:
+        if isinstance(it, ImageNodeItem):
+            br = it.pixmapBoundingRect()
+            cr = it.crop_rect
+            if cr is not None and cr.isValid():
+                br = cr.intersected(br)
+            if br.isEmpty() or not br.isValid():
+                br = it.pixmapBoundingRect()
+            return it.mapRectToScene(br)
+        return it.mapRectToScene(_visual_item_bounds(it))
+
+    @staticmethod
+    def _overlay_items_sorted_paint_order(items: list[QGraphicsItem]) -> list[QGraphicsItem]:
+        """Ascending z-order: lower layers first — later overlay windows raised on top of earlier."""
+
+        def _nid(obj: QGraphicsItem) -> str:
+            nid = getattr(obj, "node_id", None)
+            return nid if isinstance(nid, str) else ""
+
+        return sorted(items, key=lambda i: (i.zValue(), _nid(i)))
+
+    def _overlay_viewport_geometry_for_item(self, it: QGraphicsItem) -> QRectF:
+        scene_r = MainWindow._overlay_scene_geometry_rect(it)
+        poly = self._canvas.mapFromScene(scene_r)
+        return QRectF(poly.boundingRect()).normalized()
+
+    def _overlay_screen_geometries_matching_canvas_layout(
+        self,
+        ordered_items: list[QGraphicsItem],
+        avail: QRect,
+    ) -> list[QRect]:
+        layout = [self._overlay_viewport_geometry_for_item(it) for it in ordered_items]
+        U = layout[0]
+        for r in layout[1:]:
+            U = U.united(r)
+        if U.width() < 1.0:
+            U.setWidth(1.0)
+        if U.height() < 1.0:
+            U.setHeight(1.0)
+
+        margin = 8
+        inner_w = max(1.0, float(avail.width() - 2 * margin))
+        inner_h = max(1.0, float(avail.height() - 2 * margin))
+        scale = min(inner_w / U.width(), inner_h / U.height())
+
+        scaled_w = U.width() * scale
+        scaled_h = U.height() * scale
+        origin_x = float(avail.x() + margin) + (inner_w - scaled_w) * 0.5 - U.left() * scale
+        origin_y = float(avail.y() + margin) + (inner_h - scaled_h) * 0.5 - U.top() * scale
+
+        geoms: list[QRect] = []
+        for r in layout:
+            x = int(round(origin_x + r.left() * scale))
+            y = int(round(origin_y + r.top() * scale))
+            w = max(32, int(round(r.width() * scale)))
+            h = max(32, int(round(r.height() * scale)))
+            g = QRect(x, y, w, h).intersected(avail)
+            if g.width() < 32 or g.height() < 32:
+                g = QRect(x, y, w, h)
+            geoms.append(g)
+        return geoms
+
+    @staticmethod
+    def _pixmap_and_gif_for_overlay(it: ImageNodeItem) -> tuple[QPixmap, str | None]:
+        pm = it.pixmap()
+        cr = it.crop_rect
+        if cr is not None and cr.isValid():
+            br = it.pixmapBoundingRect()
+            inter = cr.intersected(br)
+            r = inter.toAlignedRect()
+            if r.width() > 0 and r.height() > 0:
+                pm = pm.copy(r)
+        src = it.source_path
+        gif = src if src and Path(src).suffix.lower() == ".gif" else None
+        return pm, gif
+
+    def _overlay_render_item_snapshot(self, it: QGraphicsItem) -> QPixmap:
+        scene = it.scene()
+        if scene is None:
+            return QPixmap()
+        if isinstance(it, NoteNodeItem):
+            it.finalize_text_edit_visual()
+
+        was_sel = it.isSelected()
+        if was_sel:
+            it.setSelected(False)
+
+        try:
+            # Render only this item onto a transparent buffer so semi-transparent UI
+            # layers do not bake in whatever sits behind them on the canvas.
+            r = MainWindow._overlay_item_local_paint_rect(it)
+            w_pix = max(32, min(8192, int(math.ceil(r.width()))))
+            h_pix = max(32, min(8192, int(math.ceil(r.height()))))
+            pm = QPixmap(w_pix, h_pix)
+            pm.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(pm)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            painter.translate(-r.left(), -r.top())
+
+            opt = QStyleOptionGraphicsItem()
+            opt.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Active
+            opt.rect = r.toAlignedRect()
+            opt.exposedRect = QRectF(r)
+
+            it.paint(painter, opt, None)
+            painter.end()
+            return pm
+        finally:
+            if was_sel:
+                it.setSelected(True)
+
+    def _overlay_pixmap_payload(self, it: QGraphicsItem) -> tuple[QPixmap, str | None]:
+        if isinstance(it, ImageNodeItem):
+            return MainWindow._pixmap_and_gif_for_overlay(it)
+        pm = self._overlay_render_item_snapshot(it)
+        return pm, None
+
+    def _overlay_target_available_geometry(self) -> QRect:
+        g = self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+        screen = QGuiApplication.screenAt(g)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return QRect(0, 0, 1200, 800)
+        return screen.availableGeometry()
+
+    def _overlay_apply_transparent_canvas(self) -> bool:
+        self._purge_invisible_overlay_windows()
+        self._overlay_restore_canvas_background_if_idle()
+        if self._image_overlay_windows:
+            return True
+        try:
+            self._saved_scene_background_brush = QBrush(self._canvas.graphics_scene().backgroundBrush())
+            self._saved_view_background_brush = QBrush(self._canvas.backgroundBrush())
+            transparent = QColor(0, 0, 0, 0)
+            self._canvas.graphics_scene().setBackgroundBrush(transparent)
+            self._canvas.setBackgroundBrush(transparent)
+            self._canvas.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self._canvas.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self._canvas.viewport().setAutoFillBackground(False)
+        except RuntimeError:
+            self._saved_scene_background_brush = None
+            self._saved_view_background_brush = None
+            return False
+        return True
+
+    def _overlay_restore_canvas_background_if_idle(self) -> None:
+        if self._image_overlay_windows:
+            return
+
+        had_saved = (
+            self._saved_scene_background_brush is not None
+            or self._saved_view_background_brush is not None
+        )
+        if not had_saved:
+            return
+
+        try:
+            if self._saved_scene_background_brush is not None:
+                self._canvas.graphics_scene().setBackgroundBrush(self._saved_scene_background_brush)
+            if self._saved_view_background_brush is not None:
+                self._canvas.setBackgroundBrush(self._saved_view_background_brush)
+        except RuntimeError:
+            pass
+        finally:
+            self._saved_scene_background_brush = None
+            self._saved_view_background_brush = None
+
+        try:
+            self._canvas.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            self._canvas.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        except RuntimeError:
+            pass
+
+    def _overlay_selection(self) -> None:
+        scene = self._canvas.graphics_scene()
+        items = [
+            it
+            for it in scene.selectedItems()
+            if isinstance(it, _OVERLAY_SELECTION_TYPES)
+        ]
+        if not items:
+            return
+
+        ordered = MainWindow._overlay_items_sorted_paint_order(items)
+        placements: list[tuple[QGraphicsItem, QPixmap, str | None]] = []
+        for it in ordered:
+            pm, gif_path = self._overlay_pixmap_payload(it)
+            if pm.isNull():
+                continue
+            placements.append((it, pm, gif_path))
+        if not placements:
+            return
+
+        if not self._overlay_apply_transparent_canvas():
+            return
+
+        avail = self._overlay_target_available_geometry()
+        layout_items = [p[0] for p in placements]
+        geoms = self._overlay_screen_geometries_matching_canvas_layout(layout_items, avail)
+
+        for (_, pm, gif_path), geom in zip(placements, geoms, strict=True):
+            win = ImageOverlayWindow(pm, gif_path, self)
+            win.setGeometry(geom)
+            self._image_overlay_windows.append(win)
+            win.destroyed.connect(
+                lambda *_, w_ref=win: self._on_image_overlay_window_destroyed(w_ref)
+            )
+            win.show()
+
+        QTimer.singleShot(0, self._refocus_canvas_after_overlay_spawn)
+
+    def _on_image_overlay_window_destroyed(self, win: ImageOverlayWindow) -> None:
+        try:
+            self._image_overlay_windows.remove(win)
+        except ValueError:
+            pass
+        self._purge_invisible_overlay_windows()
+        self._overlay_restore_canvas_background_if_idle()
+
+    def _close_all_image_overlays(self) -> None:
+        for w in list(self._image_overlay_windows):
+            try:
+                w.close()
+            except RuntimeError:
+                pass
+        self._purge_invisible_overlay_windows()
+        self._overlay_restore_canvas_background_if_idle()
+        QTimer.singleShot(0, self._refocus_canvas_after_overlay_spawn)
 
     def _export_scene(self) -> None:
         path_str, selected_filter = QFileDialog.getSaveFileName(

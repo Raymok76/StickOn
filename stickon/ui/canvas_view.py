@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt, QMimeData, QTimer, Signal
 from PySide6.QtGui import (
+    QClipboard,
     QColor,
     QContextMenuEvent,
     QDragEnterEvent,
@@ -30,6 +31,91 @@ from stickon.scene.items.group_item import GroupNodeItem
 from stickon.scene.items.image_item import ImageNodeItem
 from stickon.scene.items.note_item import NoteNodeItem
 from stickon.services.project_service import sample_color_at_global
+
+# Clipboard / drag payloads on Windows often expose PNG/JPEG bytes without hasImage().
+_KNOWN_RASTER_MIME_TYPES = frozenset(
+    {
+        "application/x-qt-image",
+        "application/x-moz-nativeimage",
+        "PNG",
+        "JFIF",
+        "jpeg",
+        "jpg",
+        "webp",
+        "GIF",
+        "bmp",
+        "tif",
+        "TIFF",
+    }
+)
+
+
+def _mime_data_contains_raster(mime: QMimeData | None) -> bool:
+    if mime is None:
+        return False
+    if mime.hasUrls() or mime.hasImage():
+        return True
+    for fmt in mime.formats():
+        low = fmt.lower()
+        if low.startswith("image/") and "svg" not in low:
+            return True
+        if fmt in _KNOWN_RASTER_MIME_TYPES:
+            return True
+    return False
+
+
+def _pixmap_from_mimedata(mime: QMimeData) -> QPixmap | None:
+    if mime.hasImage():
+        v = mime.imageData()
+        if isinstance(v, QImage) and not v.isNull():
+            pm = QPixmap.fromImage(v)
+            if not pm.isNull():
+                return pm
+        if isinstance(v, QPixmap) and not v.isNull():
+            return v
+    for fmt in (
+        "image/png",
+        "image/x-png",
+        "PNG",
+        "png",
+        "image/jpeg",
+        "image/jpg",
+        "image/pjpeg",
+        "JFIF",
+        "jpeg",
+        "image/webp",
+        "WEBP",
+        "image/bmp",
+        "image/x-ms-bmp",
+        "image/x-bmp",
+        "Windows Bitmap",
+        "BMP",
+        "BMF",
+        "image/tiff",
+        "image/x-tiff",
+        "TIFF",
+    ):
+        if mime.hasFormat(fmt):
+            data = mime.data(fmt)
+            if data:
+                img = QImage()
+                if img.loadFromData(data):
+                    pm = QPixmap.fromImage(img)
+                    if not pm.isNull():
+                        return pm
+    for fmt in mime.formats():
+        low = fmt.lower()
+        if not low.startswith("image/") or "svg" in low:
+            continue
+        data = mime.data(fmt)
+        if not data:
+            continue
+        img = QImage()
+        if img.loadFromData(data):
+            pm = QPixmap.fromImage(img)
+            if not pm.isNull():
+                return pm
+    return None
 
 
 def _visual_item_bounds(it: QGraphicsItem) -> QRectF:
@@ -149,7 +235,7 @@ class CanvasView(QGraphicsView):
     def mime_accepts_external_drop(mime: QMimeData | None) -> bool:
         if mime is None:
             return False
-        return mime.hasUrls() or mime.hasImage()
+        return _mime_data_contains_raster(mime)
 
     def scene_image_count(self) -> int:
         return sum(1 for it in self._scene.items() if isinstance(it, ImageNodeItem))
@@ -449,9 +535,15 @@ class CanvasView(QGraphicsView):
                 continue
             it.set_gif_movie(QMovie(str(sp), parent=self))
 
-    def apply_drop_mime(self, mime: QMimeData | None, origin_scene: QPointF) -> None:
+    def apply_drop_mime(
+        self,
+        mime: QMimeData | None,
+        origin_scene: QPointF,
+        *,
+        clipboard: QClipboard | None = None,
+    ) -> list[ImageNodeItem]:
         if mime is None:
-            return
+            return []
         before = self.scene_image_count()
         step = QPointF(24, 24)
         cur = origin_scene
@@ -466,9 +558,25 @@ class CanvasView(QGraphicsView):
                         added.append(it)
                     handled = True
                     cur += step
-        if not handled and mime.hasImage():
-            img = mime.imageData()
-            if isinstance(img, QImage) and not img.isNull():
+        if not handled:
+            pm = _pixmap_from_mimedata(mime)
+            if pm is not None and not pm.isNull():
+                it = ImageNodeItem(pm, None)
+                it.setPos(cur)
+                self._scene.addItem(it)
+                added.append(it)
+                handled = True
+        if not handled and mime.hasText():
+            t = mime.text().strip().strip('"')
+            p = Path(t)
+            if p.is_file():
+                it = self.add_image_from_path(str(p), cur)
+                if it is not None:
+                    added.append(it)
+                    handled = True
+        if not handled and clipboard is not None:
+            img = clipboard.image()
+            if not img.isNull():
                 pm = QPixmap.fromImage(img)
                 if not pm.isNull():
                     it = ImageNodeItem(pm, None)
@@ -479,6 +587,7 @@ class CanvasView(QGraphicsView):
         gifs_drop = tuple(it for it in added if it._movie is not None and it.source_path)
         if gifs_drop:
             QTimer.singleShot(120, lambda: self._restart_gifs_after_drop(gifs_drop))
+        return added
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         win = self.window()
