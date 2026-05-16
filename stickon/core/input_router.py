@@ -69,6 +69,8 @@ def parse_shortcut(s: str) -> KeyChord | None:
         "up": Qt.Key_Up,
         "down": Qt.Key_Down,
         "escape": Qt.Key_Escape,
+        "del": Qt.Key_Delete,
+        "delete": Qt.Key_Delete,
     }
     k = key_map.get(tok, None)
     if k is None and len(tok) == 1:

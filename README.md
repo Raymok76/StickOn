@@ -14,7 +14,7 @@ Built with **PySide6 (Qt 6)** and installed as a small Python package so you can
 
 ## Features
 
-- **Images as first-class citizens** — Drag files from Explorer or paste from the clipboard (`Ctrl+V`: bitmap or a file path). GIFs animate; corner handles resize; crops, rotate, scale, and flip gestures stay on the canvas.
+- **Images as first-class citizens** — Drag files from Explorer or paste from the clipboard (`Ctrl+V`: bitmap or a file path). On Windows, grab a screenshot with the built-in tools (**Win+Shift+S**, Snipping Tool, **Print Screen**, or any capture that lands on the clipboard), then switch to StickOn and press **Ctrl+V** to paste the shot directly onto the canvas—no saving a file first. GIFs animate; corner handles resize; crops, rotate, scale, and flip gestures stay on the canvas.
 - **Notes** — Add notes with `Ctrl+N`, or double-click canvas to place one under the pointer, or edit inline by double-clicking a note. Resize handles scale text with the card.
 - **Layout helpers** — Pack images into the viewport, align selections, and group nodes when you need them to move together.
 - **Window that behaves like a tool** — Always on top or bottom, adjustable opacity, optional **click-through** (`Ctrl+T`) so you can see through to apps underneath (Windows uses precise hit-testing so the title bar and resize rim stay clickable).
@@ -47,7 +47,8 @@ Drawing mode, scene export, undo/redo, and GIF playback controls round out the w
 
 ### File I/O & Persistence
 
-- `Export Actions`: `Ctrl+E` (Export Scene) to rasterize the canvas or extract nodes to standard formats (PNG, JPG) on the local file system.
+- `Save Format`: `.sti` (Proprietary binary file). Stores layout coordinates, hierarchy, and embeds or links image binary data.
+- `Export Actions`: `Ctrl+E` (Export Scene) or `Ctrl+Shift+I` (Export Selected Images) to rasterize the canvas or extract nodes to standard formats (PNG, BMP, JPG) on the local file system.
 
 
 ---

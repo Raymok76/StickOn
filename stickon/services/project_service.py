@@ -117,10 +117,10 @@ def scene_to_pur_data(scene: QGraphicsScene) -> tuple[dict[str, Any], dict[str, 
     blobs: dict[str, bytes] = {}
 
     persist_types = (ImageNodeItem, NoteNodeItem, DrawNodeItem, GroupNodeItem)
+    # Bottom-first stacking (same as items(AscendingOrder)) without passing SortOrder —
+    # avoids PySide resolving the wrong items() overload on some platforms.
     stack_order = [
-        it
-        for it in scene.items(Qt.SortOrder.AscendingOrder)
-        if isinstance(it, persist_types)
+        it for it in reversed(list(scene.items())) if isinstance(it, persist_types)
     ]
     z_top_level: dict[int, float] = {}
     for i, it in enumerate(
@@ -162,6 +162,8 @@ def scene_to_pur_data(scene: QGraphicsScene) -> tuple[dict[str, Any], dict[str, 
                 "group_id": gid,
                 "payload": payload,
             }
+            if crop is not None:
+                node["crop"] = crop
             node.update(_transform_payload(it))
             nodes.append(node)
         elif isinstance(it, NoteNodeItem):

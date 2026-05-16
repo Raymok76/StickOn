@@ -11,7 +11,7 @@ VERSION = 1
 
 def _require_available(data: bytes, pos: int, size: int, what: str) -> None:
     if pos < 0 or size < 0 or pos + size > len(data):
-        raise ValueError(f"Corrupt .pur: truncated {what}")
+        raise ValueError(f"Corrupt .sti: truncated {what}")
 
 
 def _encode_blob_table(blobs: dict[str, bytes]) -> bytes:
@@ -35,7 +35,7 @@ def _decode_blob_table(data: bytes, offset: int) -> tuple[dict[str, bytes], int]
     blobs: dict[str, bytes] = {}
     # Minimum bytes per blob entry is key_len(u16) + data_len(u32).
     if count > (len(data) - pos) // 6:
-        raise ValueError("Corrupt .pur: blob entry count exceeds data size")
+        raise ValueError("Corrupt .sti: blob entry count exceeds data size")
     for _ in range(count):
         _require_available(data, pos, 2, "blob key length")
         (kl,) = struct.unpack_from("<H", data, pos)
@@ -44,7 +44,7 @@ def _decode_blob_table(data: bytes, offset: int) -> tuple[dict[str, bytes], int]
         try:
             key = data[pos : pos + kl].decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ValueError("Corrupt .pur: invalid blob key encoding") from exc
+            raise ValueError("Corrupt .sti: invalid blob key encoding") from exc
         pos += kl
         _require_available(data, pos, 4, "blob data length")
         (dl,) = struct.unpack_from("<I", data, pos)
@@ -76,12 +76,12 @@ def load_pur(path: str | Path) -> tuple[dict[str, Any], dict[str, bytes]]:
     jstart = len(MAGIC) + 8
     jend = jstart + jlen
     if jend > len(raw):
-        raise ValueError("Corrupt .pur: manifest length exceeds file size")
+        raise ValueError("Corrupt .sti: manifest length exceeds file size")
     try:
         manifest = json.loads(raw[jstart:jend].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("Corrupt .pur: invalid manifest JSON") from exc
+        raise ValueError("Corrupt .sti: invalid manifest JSON") from exc
     blobs, end = _decode_blob_table(raw, jend)
     if end != len(raw):
-        raise ValueError("Corrupt .pur: trailing bytes after blob table")
+        raise ValueError("Corrupt .sti: trailing bytes after blob table")
     return manifest, blobs

@@ -30,6 +30,7 @@ from stickon.core.commands import Command
 from stickon.core.input_router import parse_shortcut
 
 
+# Legacy: stripped from stored shortcut strings for note.new (see stored_shortcut_chord_only).
 NOTE_NEW_PALETTE_HINT_SUFFIX = ", double click in canvas"
 
 
@@ -215,9 +216,6 @@ class CommandPaletteDialog(QDialog):
 
     @staticmethod
     def _shortcut_cell(cmd: Command) -> str:
-        if cmd.id == "note.new":
-            key = stored_shortcut_chord_only(cmd.id, cmd.shortcut) or "—"
-            return f"{key}{NOTE_NEW_PALETTE_HINT_SUFFIX}"
         return (cmd.shortcut or "").strip() or "—"
 
     def refresh_commands(self, commands: list[Command]) -> None:
@@ -266,7 +264,6 @@ class CommandPaletteDialog(QDialog):
             for c in self._commands
             if t in c.title.lower()
             or t in c.id.lower()
-            or (c.id == "note.new" and ("double" in t or "click" in t or "canvas" in t))
         ]
         self._populate(filtered)
 

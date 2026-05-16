@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import math
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import (
     QAbstractNativeEventFilter,
     QCoreApplication,
+    QDateTime,
     QEasingCurve,
     QEvent,
     QObject,
@@ -47,6 +49,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPushButton,
     QStyle,
     QStyleOptionGraphicsItem,
@@ -63,9 +66,14 @@ from stickon.scene.items.draw_item import DrawNodeItem
 from stickon.scene.items.image_item import ImageNodeItem
 from stickon.scene.items.note_item import NoteAppearance, NoteNodeItem
 from stickon.services.export_service import ExportService
+from stickon.services.io_service import save_pur
 from stickon.services.layout_service import LayoutService
-from stickon.services.project_service import load_scene_from_path, save_scene_to_path
-from stickon.services.session_service import autosession_path
+from stickon.services.project_service import load_scene_from_path, save_scene_to_path, scene_to_pur_data
+from stickon.services.session_service import (
+    autosession_path,
+    legacy_autosession_path,
+    resolved_autosession_path_for_read,
+)
 from stickon.ui.canvas_view import CanvasView, _visual_item_bounds
 from stickon.ui.font_settings_dialog import FontSettingsDialog
 from stickon.ui.command_palette import (
@@ -119,9 +127,38 @@ _CONTEXT_MENU_EXCLUDE_IDS = frozenset(
         "window.click_through",
         "window.click_through_off",
         "window.fit_content",
+        "scene.clear_all",
         "node.group",
     }
 )
+
+_CONTEXT_MENU_SHORTCUT_SUFFIX_IDS = frozenset(
+    {
+        "edit.paste_clipboard",
+    }
+)
+
+# Built-in only: Command Key / shortcut_overrides cannot reassign these (wheel is separate, canvas).
+_NON_CUSTOMIZABLE_COMMAND_IDS = frozenset(
+    {
+        "edit.paste_clipboard",
+        "window.opacity_up",
+        "window.opacity_down",
+        "note.new",
+    }
+)
+
+_PASTE_CLIPBOARD_CMD_ID = "edit.paste_clipboard"
+_PASTE_CLIPBOARD_SHORTCUT_FIXED = "Ctrl+V"
+
+_OPACITY_UP_CMD_ID = "window.opacity_up"
+_OPACITY_DOWN_CMD_ID = "window.opacity_down"
+_OPACITY_UP_SHORTCUT_LABEL = "Ctrl+Shift++"
+_OPACITY_DOWN_SHORTCUT_LABEL = "Ctrl+Shift+-"
+_OPACITY_UP_ALIASES = frozenset({_OPACITY_UP_SHORTCUT_LABEL, "Ctrl+Shift+="})
+
+_NOTE_NEW_CMD_ID = "note.new"
+_NOTE_NEW_SHORTCUT_FIXED = "Ctrl+N"
 
 
 class _WinClickThroughNativeFilter(QAbstractNativeEventFilter):
@@ -224,12 +261,23 @@ class MainWindow(QMainWindow):
             f"QPushButton:hover {{ background-color: #d8f0e4; }}"
             f"QPushButton:pressed {{ background-color: #c6f0d6; border: 1px solid white; }}"
         )
+        self._btn_clear_all = QPushButton("Clear all", root)
+        self._btn_clear_all.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_clear_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_clear_all.clicked.connect(self._on_clear_all_clicked)
+        self._btn_clear_all.setStyleSheet(
+            f"QPushButton {{ background-color: {_BAR_BG}; border: 1px solid white; "
+            f"border-radius: {r}px; padding: 4px 12px; color: #333; }}"
+            f"QPushButton:hover {{ background-color: #ffe0e0; }}"
+            f"QPushButton:pressed {{ background-color: #ffcccc; border: 1px solid white; }}"
+        )
         self._stickon_maximized = False
         self._geom_before_stickon_max = QRect()
         self._title_bar = DraggableTitleBar(
             self,
             [self._seg_lock, self._seg_through, self._btn_fit_content],
-            root,
+            trailing_widgets=[self._btn_clear_all],
+            parent=root,
         )
         lay.addWidget(self._title_bar)
 
@@ -253,6 +301,35 @@ class MainWindow(QMainWindow):
         self._saved_scene_background_brush: QBrush | None = None
         self._saved_view_background_brush: QBrush | None = None
         self._image_overlay_windows: list[ImageOverlayWindow] = []
+        self._delete_shortcut_suppressed = False
+        self._global_shortcuts_suppressed = False
+        self._file_dialog_guard_release = QTimer(self)
+        self._file_dialog_guard_release.setSingleShot(True)
+        self._file_dialog_guard_release.timeout.connect(self._clear_file_dialog_shortcut_guard)
+        self._post_save_scene_guard = QTimer(self)
+        self._post_save_scene_guard.setSingleShot(False)
+        self._post_save_scene_guard.setInterval(250)
+        self._post_save_scene_guard.timeout.connect(self._on_post_save_scene_guard_tick)
+        self._post_save_scene_guard_deadline = 0
+        self._post_save_manifest_guard = QTimer(self)
+        self._post_save_manifest_guard.setSingleShot(False)
+        self._post_save_manifest_guard.setInterval(250)
+        self._post_save_manifest_guard.timeout.connect(self._on_post_save_manifest_guard_tick)
+        self._post_save_manifest_guard_deadline = 0
+        self._post_save_manifest_snapshot: dict[str, Any] | None = None
+        self._post_save_blobs_snapshot: dict[str, bytes] | None = None
+        self._post_save_layer_snapshot: list[
+            tuple[
+                object,
+                QPointF,
+                float,
+                float,
+                float,
+                QPointF,
+                QTransform,
+                GroupNodeItem | None,
+            ]
+        ] = []
 
         self._canvas.installEventFilter(self)
         self._canvas.viewport().installEventFilter(self)
@@ -309,14 +386,20 @@ class MainWindow(QMainWindow):
                 window_geometry=(g.x(), g.y(), g.width(), g.height()),
                 view_state=self._capture_canvas_view_state(),
             )
+            try:
+                leg = legacy_autosession_path()
+                if leg.is_file():
+                    leg.unlink()
+            except OSError:
+                pass
         except Exception:
             # Autosave must not prevent shutdown (e.g. older PySide APIs, disk errors).
             pass
         super().closeEvent(event)
 
     def _restore_autosession_if_any(self) -> None:
-        path = autosession_path()
-        if not path.is_file():
+        path = resolved_autosession_path_for_read()
+        if path is None:
             return
         try:
             m = load_scene_from_path(self._canvas.graphics_scene(), path)
@@ -608,12 +691,46 @@ class MainWindow(QMainWindow):
     def _on_fit_content_clicked(self) -> None:
         self._fit_window_to_content(keep_current_view=True)
 
+    def _on_clear_all_clicked(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Clear all",
+            "Clear all images and layers (notes and drawings)?\n\n"
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._clear_all_scene_layers()
+
+    def _clear_all_scene_layers(self) -> None:
+        self._close_all_image_overlays()
+        self._disarm_post_save_scene_guard()
+        self._last_text_edit_note = None
+        self._canvas.reset_pointer_interaction_state()
+        scene = self._canvas.graphics_scene()
+        scene.clearSelection()
+        persist_types = (ImageNodeItem, NoteNodeItem, DrawNodeItem, GroupNodeItem)
+        for it in list(scene.items()):
+            if not isinstance(it, persist_types) or it.parentItem() is not None:
+                continue
+            if isinstance(it, NoteNodeItem):
+                it.finalize_text_edit_visual()
+            if isinstance(it, ImageNodeItem):
+                it.set_gif_movie(None)
+            scene.removeItem(it)
+        self._history.clear()
+        self._canvas.viewport().update()
+        self._schedule_fit_window_to_content()
+
     def _register_commands(self) -> None:
         def reg(
             cid: str,
             fn: Callable[[dict[str, Any]], None],
             *,
             is_checked: Callable[[], bool] | None = None,
+            palette: bool = True,
         ) -> None:
             title = cid
             shortcut = None
@@ -629,8 +746,13 @@ class MainWindow(QMainWindow):
                     handler=fn,
                     shortcut=str(shortcut) if shortcut else None,
                     is_checked=is_checked,
+                    palette=palette,
                 )
             )
+
+        # Registration order is CommandRegistry.all() iteration order (palette, Layers dialog).
+        # Context menu uses .all() minus _CONTEXT_MENU_EXCLUDE_IDS — list window actions that appear
+        # there first (separator is drawn after Always on Bottom in _show_commands_context_menu_at).
 
         reg("palette.open", lambda ctx: self._open_palette())
         reg(
@@ -643,13 +765,14 @@ class MainWindow(QMainWindow):
             lambda ctx: self._win_state.toggle_always_on_bottom(),
             is_checked=lambda: self._win_state.always_on_bottom,
         )
+        reg("edit.paste_clipboard", lambda ctx: self._paste_clipboard_from_command(), palette=False)
+        reg("window.opacity_up", lambda ctx: self._win_state.adjust_opacity(0.08))
+        reg("window.opacity_down", lambda ctx: self._win_state.adjust_opacity(-0.08))
         reg(
             "window.click_through",
             lambda ctx: self._win_state.toggle_click_through(),
             is_checked=lambda: self._win_state.click_through,
         )
-        reg("window.opacity_up", lambda ctx: self._win_state.adjust_opacity(0.08))
-        reg("window.opacity_down", lambda ctx: self._win_state.adjust_opacity(-0.08))
         reg(
             "window.lock",
             lambda ctx: self._win_state.toggle_lock_position(),
@@ -657,6 +780,7 @@ class MainWindow(QMainWindow):
         )
         reg("window.click_through_off", lambda ctx: self._win_state.set_click_through(False))
         reg("window.fit_content", lambda ctx: self._on_fit_content_clicked())
+        reg("scene.clear_all", lambda ctx: self._on_clear_all_clicked())
         reg("layout.pack", lambda ctx: self._pack())
         reg("layout.layers", lambda ctx: self._open_layers_dialog())
         reg("layout.align_left", lambda ctx: self._align("left"))
@@ -675,6 +799,9 @@ class MainWindow(QMainWindow):
         reg("edit.redo", lambda ctx: self._history.redo())
         reg("edit.select_all", lambda ctx: self._select_all())
         reg("export.scene", lambda ctx: self._export_scene())
+        reg("export.selection", lambda ctx: self._export_selected_layers())
+        reg("project.save", lambda ctx: self._save_project())
+        reg("project.load", lambda ctx: self._load_project())
         reg("gif.pause", lambda ctx: self._gif_pause())
         reg("gif.resume", lambda ctx: self._gif_resume())
         reg("gif.next_frame", lambda ctx: self._gif_step(1))
@@ -887,6 +1014,8 @@ class MainWindow(QMainWindow):
         out: dict[str, str] = {}
         for k, v in raw.items():
             if isinstance(k, str) and isinstance(v, str) and v.strip():
+                if k in _NON_CUSTOMIZABLE_COMMAND_IDS:
+                    continue
                 chord = stored_shortcut_chord_only(k, v.strip())
                 if chord:
                     out[k] = chord
@@ -924,11 +1053,47 @@ class MainWindow(QMainWindow):
                 continue
             shortcut_map.pop(sc, None)
             shortcut_map[sc] = cid
+        self._enforce_fixed_command_shortcuts(shortcut_map)
         return shortcut_map
+
+    @staticmethod
+    def _enforce_fixed_command_shortcuts(shortcut_map: dict[str, str]) -> None:
+        for k, v in list(shortcut_map.items()):
+            if v == _PASTE_CLIPBOARD_CMD_ID and k != _PASTE_CLIPBOARD_SHORTCUT_FIXED:
+                del shortcut_map[k]
+        shortcut_map[_PASTE_CLIPBOARD_SHORTCUT_FIXED] = _PASTE_CLIPBOARD_CMD_ID
+
+        for k, v in list(shortcut_map.items()):
+            if v == _OPACITY_UP_CMD_ID and k not in _OPACITY_UP_ALIASES:
+                del shortcut_map[k]
+        for chord in _OPACITY_UP_ALIASES:
+            shortcut_map[chord] = _OPACITY_UP_CMD_ID
+
+        for k, v in list(shortcut_map.items()):
+            if v == _OPACITY_DOWN_CMD_ID and k != _OPACITY_DOWN_SHORTCUT_LABEL:
+                del shortcut_map[k]
+        shortcut_map[_OPACITY_DOWN_SHORTCUT_LABEL] = _OPACITY_DOWN_CMD_ID
+
+        for k, v in list(shortcut_map.items()):
+            if v == _NOTE_NEW_CMD_ID and k != _NOTE_NEW_SHORTCUT_FIXED:
+                del shortcut_map[k]
+        shortcut_map[_NOTE_NEW_SHORTCUT_FIXED] = _NOTE_NEW_CMD_ID
 
     def _sync_command_shortcut_labels_from_map(self) -> None:
         meta_by_id = self._meta.by_id()
         for cmd in self._registry.all():
+            if cmd.id == _PASTE_CLIPBOARD_CMD_ID:
+                cmd.shortcut = _PASTE_CLIPBOARD_SHORTCUT_FIXED
+                continue
+            if cmd.id == _OPACITY_UP_CMD_ID:
+                cmd.shortcut = _OPACITY_UP_SHORTCUT_LABEL
+                continue
+            if cmd.id == _OPACITY_DOWN_CMD_ID:
+                cmd.shortcut = _OPACITY_DOWN_SHORTCUT_LABEL
+                continue
+            if cmd.id == _NOTE_NEW_CMD_ID:
+                cmd.shortcut = _NOTE_NEW_SHORTCUT_FIXED
+                continue
             if cmd.id in self._shortcut_overrides:
                 cmd.shortcut = stored_shortcut_chord_only(cmd.id, self._shortcut_overrides[cmd.id])
                 continue
@@ -938,6 +1103,8 @@ class MainWindow(QMainWindow):
             cmd.shortcut = stored_shortcut_chord_only(cmd.id, raw) or None
 
     def _apply_shortcut_override(self, command_id: str, portable: str) -> None:
+        if command_id in _NON_CUSTOMIZABLE_COMMAND_IDS:
+            return
         chord = stored_shortcut_chord_only(command_id, portable.strip())
         if not chord:
             return
@@ -976,7 +1143,9 @@ class MainWindow(QMainWindow):
         self._history.push(HistoryEntry(do_redo=redo, undo=undo, label="shortcut defaults"))
 
     def _set_shortcut_overrides_state(self, overrides: dict[str, str]) -> None:
-        self._shortcut_overrides = dict(overrides)
+        self._shortcut_overrides = {
+            k: v for k, v in dict(overrides).items() if k not in _NON_CUSTOMIZABLE_COMMAND_IDS
+        }
         path = _shortcut_overrides_path()
         if self._shortcut_overrides:
             self._save_shortcut_overrides()
@@ -1097,6 +1266,36 @@ class MainWindow(QMainWindow):
         return self._note_appearance_defaults
 
     def _on_palette_shortcut_customize(self, command_id: str, palette_dlg: CommandPaletteDialog) -> None:
+        if command_id == _PASTE_CLIPBOARD_CMD_ID:
+            QMessageBox.information(
+                self,
+                "Shortcut fixed",
+                "Paste from clipboard is always Ctrl+V and cannot be reassigned.",
+            )
+            return
+        if command_id == _OPACITY_UP_CMD_ID:
+            QMessageBox.information(
+                self,
+                "Shortcuts fixed",
+                "Opacity Up is always Ctrl+Shift++ (Ctrl+Shift+= on some keyboards) and Ctrl+wheel up; "
+                "those shortcuts cannot be reassigned.",
+            )
+            return
+        if command_id == _OPACITY_DOWN_CMD_ID:
+            QMessageBox.information(
+                self,
+                "Shortcuts fixed",
+                "Opacity Down is always Ctrl+Shift+- and Ctrl+wheel down; those shortcuts cannot be reassigned.",
+            )
+            return
+        if command_id == _NOTE_NEW_CMD_ID:
+            QMessageBox.information(
+                self,
+                "Shortcuts fixed",
+                "New Note is always Ctrl+N. Creating a note by double-clicking the canvas is fixed and "
+                "cannot be reassigned.",
+            )
+            return
         rec = RecordShortcutDialog(self)
         if rec.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1178,6 +1377,18 @@ class MainWindow(QMainWindow):
         self._overlay_restore_canvas_background_if_idle()
         if self._dispatch_note_text_undo_redo(event):
             return True
+        if self.shortcuts_temporarily_suppressed():
+            mods = event.modifiers()
+            has_global_mod = bool(
+                mods
+                & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.AltModifier
+                    | Qt.KeyboardModifier.MetaModifier
+                )
+            )
+            if event.key() == Qt.Key_Delete or has_global_mod:
+                return True
 
         if (
             event.key() == Qt.Key_Escape
@@ -1191,9 +1402,18 @@ class MainWindow(QMainWindow):
             return True
 
         if (
+            event.key() == Qt.Key_V
+            and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            and self._scene_note_in_text_edit()
+        ):
+            return False
+
+        if (
             event.key() == Qt.Key_Delete
             and event.modifiers() == Qt.KeyboardModifier.NoModifier
         ):
+            if self.delete_shortcuts_suppressed():
+                return True
             return self._delete_selected_with_history()
 
         cid = self._router.match_key_event(event)
@@ -1206,11 +1426,6 @@ class MainWindow(QMainWindow):
             and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         ):
             self._execute("edit.redo")
-            return True
-        if event.key() == Qt.Key_V and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
-            if self._scene_note_in_text_edit():
-                return False
-            self._paste_clipboard()
             return True
         return False
 
@@ -1457,6 +1672,11 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    def _paste_clipboard_from_command(self) -> None:
+        if self._scene_note_in_text_edit():
+            return
+        self._paste_clipboard()
+
     def _paste_clipboard(self) -> None:
         cb = QGuiApplication.clipboard()
         assert cb is not None
@@ -1557,6 +1777,7 @@ class MainWindow(QMainWindow):
         has_overlay_candidate = any(
             isinstance(x, _OVERLAY_SELECTION_TYPES) for x in self._selected_items()
         )
+        has_image_selected = self._has_image_node_in_selection()
         cmds = [c for c in self._registry.all() if c.id not in _CONTEXT_MENU_EXCLUDE_IDS]
         palette_cmd = next((c for c in cmds if c.id == "palette.open"), None)
         rest = [c for c in cmds if c.id != "palette.open"]
@@ -1570,9 +1791,6 @@ class MainWindow(QMainWindow):
             if cmd.id in _CONTEXT_MENU_ALIGN_IDS:
                 continue
             if cmd.id == "layout.pack":
-                act_pack = QAction(cmd.title, self)
-                act_pack.triggered.connect(lambda checked=False, cid=cmd.id: self._execute(cid))
-                menu.addAction(act_pack)
                 layers_cmd = by_id.get("layout.layers")
                 if layers_cmd is not None:
                     layers_act = QAction(layers_cmd.title, self)
@@ -1580,7 +1798,12 @@ class MainWindow(QMainWindow):
                         lambda checked=False, cid=layers_cmd.id: self._execute(cid)
                     )
                     menu.addAction(layers_act)
+                act_pack = QAction(cmd.title, self)
+                act_pack.triggered.connect(lambda checked=False, cid=cmd.id: self._execute(cid))
+                act_pack.setEnabled(has_image_selected)
+                menu.addAction(act_pack)
                 align_menu = menu.addMenu("Group Alignment")
+                align_menu.setEnabled(has_image_selected)
                 for aid in _CONTEXT_MENU_ALIGN_IDS_ORDER:
                     acmd = by_id.get(aid)
                     if acmd is not None:
@@ -1588,34 +1811,48 @@ class MainWindow(QMainWindow):
                         sa.triggered.connect(lambda checked=False, cid=aid: self._execute(cid))
                         align_menu.addAction(sa)
                 continue
-            if cmd.id == "gif.pause":
+            if cmd.id in _CONTEXT_MENU_GIF_IDS:
+                continue
+            if cmd.id == "layout.layers":
+                continue
+            if cmd.id == "project.save":
+                menu.addSeparator()
+            if cmd.id == "draw.toggle":
+                menu.addSeparator()
+            if cmd.id == _NOTE_NEW_CMD_ID:
+                menu.addSeparator()
+            title = cmd.title
+            if cmd.id == _NOTE_NEW_CMD_ID:
+                title = f"{cmd.title} (double-click)"
+            elif cmd.id == _OPACITY_UP_CMD_ID:
+                title = f"{cmd.title} (Ctrl+wheel up)"
+            elif cmd.id == _OPACITY_DOWN_CMD_ID:
+                title = f"{cmd.title} (Ctrl+wheel down)"
+            elif cmd.id in _CONTEXT_MENU_SHORTCUT_SUFFIX_IDS and cmd.shortcut:
+                title = f"{cmd.title} ({cmd.shortcut})"
+            act = QAction(title, self)
+            act.triggered.connect(lambda checked=False, cid=cmd.id: self._execute(cid))
+            menu.addAction(act)
+            if cmd.id == "overlay.selection":
+                act.setEnabled(has_overlay_candidate)
+            if cmd.id == "export.selection":
+                act.setEnabled(self._has_exportable_selection())
+            if cmd.id == "edit.undo":
+                act.setEnabled(self._history.can_undo())
+            if cmd.id == "edit.redo":
+                act.setEnabled(self._history.can_redo())
+            if cmd.id == "draw.toggle":
+                has_gif_selected = self._has_gif_image_in_selection()
                 gif_menu = menu.addMenu("GIF")
+                gif_menu.setEnabled(has_gif_selected)
                 for gid in _CONTEXT_MENU_GIF_IDS_ORDER:
                     gcmd = by_id.get(gid)
                     if gcmd is not None:
                         ga = QAction(gcmd.title, self)
                         ga.triggered.connect(lambda checked=False, cid=gid: self._execute(cid))
                         gif_menu.addAction(ga)
-                continue
-            if cmd.id in _CONTEXT_MENU_GIF_IDS:
-                continue
-            if cmd.id == "layout.layers":
-                continue
-            if cmd.id == "draw.toggle":
                 menu.addSeparator()
-            if cmd.id == "note.new":
-                menu.addSeparator()
-            title = cmd.title
-            if cmd.id == "note.new":
-                title = f"{cmd.title} (double-click)"
-            act = QAction(title, self)
-            act.triggered.connect(lambda checked=False, cid=cmd.id: self._execute(cid))
-            menu.addAction(act)
-            if cmd.id == "overlay.selection":
-                act.setEnabled(has_overlay_candidate)
-            if cmd.id == "draw.toggle":
-                menu.addSeparator()
-            if cmd.id == "note.new":
+            if cmd.id == _NOTE_NEW_CMD_ID:
                 font_act = QAction("Font Setting", self)
                 font_act.triggered.connect(self._open_note_font_settings)
                 menu.addAction(font_act)
@@ -1628,6 +1865,119 @@ class MainWindow(QMainWindow):
 
     def _selected_items(self) -> list:
         return list(self._canvas.graphics_scene().selectedItems())
+
+    def _has_image_node_in_selection(self) -> bool:
+        return any(isinstance(x, ImageNodeItem) for x in self._selected_items())
+
+    def _has_gif_image_in_selection(self) -> bool:
+        return any(
+            isinstance(x, ImageNodeItem) and x._movie is not None for x in self._selected_items()
+        )
+
+    def _scene_item_type_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for it in self._canvas.graphics_scene().items():
+            name = type(it).__name__
+            counts[name] = counts.get(name, 0) + 1
+        return counts
+
+    def _capture_layer_snapshot(
+        self,
+    ) -> list[
+        tuple[
+            object,
+            QPointF,
+            float,
+            float,
+            float,
+            QPointF,
+            QTransform,
+            GroupNodeItem | None,
+        ]
+    ]:
+        scene = self._canvas.graphics_scene()
+        persist_types = (ImageNodeItem, NoteNodeItem, DrawNodeItem, GroupNodeItem)
+        return [
+            (
+                it,
+                QPointF(it.pos()),
+                float(it.rotation()),
+                float(it.zValue()),
+                float(it.scale()),
+                QPointF(it.transformOriginPoint()),
+                QTransform(it.transform()),
+                it.parentItem() if isinstance(it.parentItem(), GroupNodeItem) else None,
+            )
+            for it in scene.items()
+            if isinstance(it, persist_types)
+        ]
+
+    def _restore_layers_from_snapshot_if_missing(
+        self,
+        snapshot: list[
+            tuple[
+                object,
+                QPointF,
+                float,
+                float,
+                float,
+                QPointF,
+                QTransform,
+                GroupNodeItem | None,
+            ]
+        ],
+    ) -> bool:
+        """Attempt to restore missing items from snapshot. Returns True if all items restored."""
+        if not snapshot:
+            return True
+        live_scene = self._canvas.graphics_scene()
+        snapshot_ids = {
+            getattr(it, "node_id", None)
+            for it, *_rest in snapshot
+            if isinstance(getattr(it, "node_id", None), str)
+        }
+        persist_types = (ImageNodeItem, NoteNodeItem, DrawNodeItem, GroupNodeItem)
+        live_ids = {
+            getattr(it, "node_id")
+            for it in live_scene.items()
+            if isinstance(it, persist_types) and isinstance(getattr(it, "node_id", None), str)
+        }
+        missing_ids = snapshot_ids - live_ids
+        if not missing_ids:
+            return True
+        restored_count = 0
+        for it, pos, rot, z, sc, origin, tr, parent_group in snapshot:
+            nid = getattr(it, "node_id", None)
+            if not isinstance(nid, str) or nid not in missing_ids:
+                continue
+            try:
+                if hasattr(it, "scene") and it.scene() is None:
+                    live_scene.addItem(it)
+                    if it.scene() is not live_scene:
+                        continue
+                if hasattr(it, "setTransformOriginPoint"):
+                    it.setTransformOriginPoint(origin)
+                if hasattr(it, "setScale"):
+                    it.setScale(sc)
+                if hasattr(it, "setTransform"):
+                    it.setTransform(tr)
+                if hasattr(it, "setPos"):
+                    it.setPos(pos)
+                if hasattr(it, "setRotation"):
+                    it.setRotation(rot)
+                if hasattr(it, "setZValue"):
+                    it.setZValue(z)
+                if (
+                    parent_group is not None
+                    and parent_group.scene() is live_scene
+                    and hasattr(it, "parentItem")
+                    and it.parentItem() is None
+                ):
+                    parent_group.addToGroup(it)
+                restored_count += 1
+            except RuntimeError:
+                continue
+        return restored_count == len(missing_ids)
 
     def _pack(self) -> None:
         scene = self._canvas.graphics_scene()
@@ -1724,11 +2074,24 @@ class MainWindow(QMainWindow):
 
     def _delete_selected_with_history(self) -> bool:
         scene = self._canvas.graphics_scene()
-        selected = [
-            it
-            for it in scene.selectedItems()
-            if it.parentItem() is None and isinstance(it, (ImageNodeItem, NoteNodeItem, DrawNodeItem))
-        ]
+        sel = list(scene.selectedItems())
+        groups_sel = {it for it in sel if isinstance(it, GroupNodeItem)}
+        selected: list = []
+        for it in sel:
+            if isinstance(it, GroupNodeItem):
+                selected.append(it)
+        for it in sel:
+            if not isinstance(it, (ImageNodeItem, NoteNodeItem, DrawNodeItem)):
+                continue
+            p = it.parentItem()
+            under_selected_group = False
+            while p is not None:
+                if isinstance(p, GroupNodeItem) and p in groups_sel:
+                    under_selected_group = True
+                    break
+                p = p.parentItem()
+            if not under_selected_group:
+                selected.append(it)
         if not selected:
             return False
 
@@ -1749,6 +2112,8 @@ class MainWindow(QMainWindow):
             for it, *_rest in snapshot:
                 if isinstance(it, NoteNodeItem):
                     it.finalize_text_edit_visual()
+                if isinstance(it, ImageNodeItem):
+                    it.set_gif_movie(None)
                 if it.scene() is scene:
                     scene.removeItem(it)
 
@@ -2025,20 +2390,184 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._refocus_canvas_after_overlay_spawn)
 
     def _export_scene(self) -> None:
-        path_str, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Export Scene",
-            "",
-            "PNG (*.png);;JPEG (*.jpg *.jpeg)",
-        )
+        scene = self._canvas.graphics_scene()
+        pre_layers = self._capture_layer_snapshot()
+        pre_manifest, pre_blobs = scene_to_pur_data(scene)
+        scene.clearSelection()
+        self._begin_file_dialog_shortcut_guard()
+        try:
+            path_str, selected_filter = QFileDialog.getSaveFileName(
+                self,
+                "Export Scene",
+                "",
+                "PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp)",
+            )
+        finally:
+            self._end_file_dialog_shortcut_guard()
+        self._arm_post_save_manifest_guard(pre_manifest, pre_blobs, duration_ms=8000)
+        if not self._restore_layers_from_snapshot_if_missing(pre_layers):
+            self._restore_scene_from_manifest_snapshot_if_wiped()
         if not path_str:
+            self._arm_post_scene_guard_from_snapshot(pre_layers, duration_ms=7000)
             return
         path = Path(path_str)
         suf = path.suffix.lower()
-        if suf not in (".png", ".jpg", ".jpeg"):
+        if suf not in (".png", ".jpg", ".jpeg", ".bmp"):
             filt = selected_filter.upper()
-            path = path.with_suffix(".jpg" if "JPEG" in filt else ".png")
-        ExportService.export_scene(self._canvas.graphics_scene(), path)
+            if "JPEG" in filt:
+                path = path.with_suffix(".jpg")
+            elif "BMP" in filt:
+                path = path.with_suffix(".bmp")
+            else:
+                path = path.with_suffix(".png")
+        ExportService.export_scene(scene, path)
+        if not self._restore_layers_from_snapshot_if_missing(pre_layers):
+            self._restore_scene_from_manifest_snapshot_if_wiped()
+        self._arm_post_scene_guard_from_snapshot(pre_layers, duration_ms=7000)
+
+    def _exportable_selection(self) -> list:
+        return [
+            it
+            for it in self._selected_items()
+            if isinstance(it, (ImageNodeItem, NoteNodeItem, DrawNodeItem, GroupNodeItem))
+        ]
+
+    def _has_exportable_selection(self) -> bool:
+        return bool(self._exportable_selection())
+
+    def _export_selected_layers(self) -> None:
+        scene = self._canvas.graphics_scene()
+        pre_layers = self._capture_layer_snapshot()
+        pre_manifest, pre_blobs = scene_to_pur_data(scene)
+        targets = self._exportable_selection()
+        if not targets:
+            return
+        self._begin_file_dialog_shortcut_guard()
+        try:
+            path_str, selected_filter = QFileDialog.getSaveFileName(
+                self,
+                "Export Selected",
+                "",
+                "PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp)",
+            )
+        finally:
+            self._end_file_dialog_shortcut_guard()
+        self._arm_post_save_manifest_guard(pre_manifest, pre_blobs, duration_ms=8000)
+        if not self._restore_layers_from_snapshot_if_missing(pre_layers):
+            self._restore_scene_from_manifest_snapshot_if_wiped()
+        if not path_str:
+            self._arm_post_scene_guard_from_snapshot(pre_layers, duration_ms=7000)
+            return
+        targets = [t for t in targets if t.scene() is scene]
+        if not targets:
+            self._arm_post_scene_guard_from_snapshot(pre_layers, duration_ms=7000)
+            return
+        path = Path(path_str)
+        suf = path.suffix.lower()
+        if suf not in (".png", ".jpg", ".jpeg", ".bmp"):
+            filt = selected_filter.upper()
+            if "JPEG" in filt:
+                path = path.with_suffix(".jpg")
+            elif "BMP" in filt:
+                path = path.with_suffix(".bmp")
+            else:
+                path = path.with_suffix(".png")
+        ExportService.export_item_selection(scene, path, targets)
+        if not self._restore_layers_from_snapshot_if_missing(pre_layers):
+            self._restore_scene_from_manifest_snapshot_if_wiped()
+        self._arm_post_scene_guard_from_snapshot(pre_layers, duration_ms=7000)
+
+    def _save_project(self) -> None:
+        scene = self._canvas.graphics_scene()
+        pre_manifest, pre_blobs = scene_to_pur_data(scene)
+        pre_node_ids = {str(n.get("id")) for n in pre_manifest.get("nodes", []) if n.get("id")}
+        scene.clearSelection()
+        self._begin_file_dialog_shortcut_guard()
+        try:
+            path_str, _selected = QFileDialog.getSaveFileName(
+                self,
+                "Save Project",
+                "",
+                "StickOn project (*.sti)",
+            )
+        finally:
+            self._end_file_dialog_shortcut_guard()
+        self._arm_post_save_manifest_guard(pre_manifest, pre_blobs, duration_ms=8000)
+        if not path_str:
+            self._restore_scene_from_manifest_snapshot_if_wiped()
+            return
+        path = Path(path_str)
+        if path.suffix.lower() != ".sti":
+            path = path.with_suffix(".sti")
+        try:
+            g = self.geometry()
+            live_scene = self._canvas.graphics_scene()
+            persist_types = (ImageNodeItem, NoteNodeItem, DrawNodeItem, GroupNodeItem)
+            live_ids = {
+                getattr(it, "node_id")
+                for it in live_scene.items()
+                if isinstance(it, persist_types) and isinstance(getattr(it, "node_id", None), str)
+            }
+            missing_ids = pre_node_ids - live_ids
+            if pre_node_ids and missing_ids:
+                m = dict(pre_manifest)
+                m["window"] = {"x": int(g.x()), "y": int(g.y()), "w": int(g.width()), "h": int(g.height())}
+                m["view"] = self._capture_canvas_view_state()
+                save_pur(path, m, pre_blobs)
+                load_scene_from_path(live_scene, path)
+            else:
+                save_scene_to_path(
+                    live_scene,
+                    path,
+                    window_geometry=(g.x(), g.y(), g.width(), g.height()),
+                    view_state=self._capture_canvas_view_state(),
+                )
+            self.setWindowTitle(f"StickOn — {path.name}")
+        except OSError:
+            QMessageBox.critical(self, "Save Project", "Could not write StickOn project file.")
+
+    def _load_project(self) -> None:
+        self._disarm_post_save_scene_guard()
+        self._canvas.graphics_scene().clearSelection()
+        self._begin_file_dialog_shortcut_guard()
+        try:
+            path_str, _selected = QFileDialog.getOpenFileName(
+                self,
+                "Load Project",
+                "",
+                "StickOn project (*.sti *.pur)",
+            )
+        finally:
+            self._end_file_dialog_shortcut_guard()
+        if not path_str:
+            return
+        self._close_all_image_overlays()
+        try:
+            m = load_scene_from_path(self._canvas.graphics_scene(), path_str)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(
+                self,
+                "Load Project",
+                f"Could not open StickOn project file.\n{exc}",
+            )
+            return
+        self._history.clear()
+        self._last_text_edit_note = None
+        self._canvas.exit_draw_mode()
+        self._canvas.ensure_notes_above_images()
+        self._prune_missing_gif_sources()
+        path = Path(path_str)
+        self.setWindowTitle(f"StickOn — {path.name}")
+        win = m.get("window")
+        if isinstance(win, dict):
+            try:
+                x, y, w, h = int(win["x"]), int(win["y"]), int(win["w"]), int(win["h"])
+                if w >= self.minimumWidth() and h >= self.minimumHeight():
+                    self.setGeometry(x, y, w, h)
+            except (KeyError, TypeError, ValueError):
+                pass
+        self._pending_view_state = self._parse_canvas_view_state(m.get("view"))
+        self._apply_pending_view_state()
 
     def _gif_pause(self) -> None:
         for it in self._selected_items():
@@ -2060,3 +2589,136 @@ class MainWindow(QMainWindow):
                 idx = m.currentFrameNumber() + delta
                 idx = max(0, min(idx, fc - 1))
                 m.jumpToFrame(idx)
+
+    def _begin_file_dialog_shortcut_guard(self) -> None:
+        if self._file_dialog_guard_release.isActive():
+            self._file_dialog_guard_release.stop()
+        self._delete_shortcut_suppressed = True
+        self._global_shortcuts_suppressed = True
+
+    def _end_file_dialog_shortcut_guard(self) -> None:
+        # Deferred native-dialog key events can arrive late on Windows.
+        # Keep guard active for a few seconds or until user clicks back into canvas.
+        self._file_dialog_guard_release.start(6000)
+
+    def _clear_file_dialog_shortcut_guard(self) -> None:
+        self._delete_shortcut_suppressed = False
+        self._global_shortcuts_suppressed = False
+
+    def delete_shortcuts_suppressed(self) -> bool:
+        return self._delete_shortcut_suppressed
+
+    def shortcuts_temporarily_suppressed(self) -> bool:
+        return self._global_shortcuts_suppressed
+
+    def _arm_post_scene_guard_from_snapshot(
+        self,
+        snapshot: list[
+            tuple[
+                object,
+                QPointF,
+                float,
+                float,
+                float,
+                QPointF,
+                QTransform,
+                GroupNodeItem | None,
+            ]
+        ],
+        *,
+        duration_ms: int = 6000,
+    ) -> None:
+        self._post_save_layer_snapshot = list(snapshot)
+        if not self._post_save_layer_snapshot:
+            self._disarm_post_save_scene_guard()
+            return
+        self._post_save_scene_guard_deadline = max(1, int(QDateTime.currentMSecsSinceEpoch())) + max(
+            500, int(duration_ms)
+        )
+        self._post_save_scene_guard.start()
+
+    def _arm_post_save_scene_guard(self, *, duration_ms: int = 6000) -> None:
+        snapshot = self._capture_layer_snapshot()
+        self._arm_post_scene_guard_from_snapshot(snapshot, duration_ms=duration_ms)
+
+    def _disarm_post_save_scene_guard(self) -> None:
+        if self._post_save_scene_guard.isActive():
+            self._post_save_scene_guard.stop()
+        self._post_save_scene_guard_deadline = 0
+        self._post_save_layer_snapshot = []
+
+    def _arm_post_save_manifest_guard(
+        self,
+        manifest: dict[str, Any],
+        blobs: dict[str, bytes],
+        *,
+        duration_ms: int = 8000,
+    ) -> None:
+        if self._post_save_manifest_guard.isActive():
+            self._post_save_manifest_guard.stop()
+        self._post_save_manifest_snapshot = dict(manifest)
+        self._post_save_blobs_snapshot = dict(blobs)
+        self._post_save_manifest_guard_deadline = max(1, int(QDateTime.currentMSecsSinceEpoch())) + max(
+            500, int(duration_ms)
+        )
+        self._post_save_manifest_guard.start()
+
+    def _disarm_post_save_manifest_guard(self) -> None:
+        if self._post_save_manifest_guard.isActive():
+            self._post_save_manifest_guard.stop()
+        self._post_save_manifest_guard_deadline = 0
+        self._post_save_manifest_snapshot = None
+        self._post_save_blobs_snapshot = None
+
+    def _restore_scene_from_manifest_snapshot_if_wiped(self) -> None:
+        manifest = self._post_save_manifest_snapshot
+        blobs = self._post_save_blobs_snapshot
+        if manifest is None or blobs is None:
+            return
+        expected_nodes = manifest.get("nodes", [])
+        if not expected_nodes:
+            return
+        expected_ids = {str(n.get("id")) for n in expected_nodes if n.get("id")}
+        scene = self._canvas.graphics_scene()
+        persist_types = (ImageNodeItem, NoteNodeItem, DrawNodeItem, GroupNodeItem)
+        live_ids = {
+            getattr(it, "node_id")
+            for it in scene.items()
+            if isinstance(it, persist_types) and isinstance(getattr(it, "node_id", None), str)
+        }
+        missing_ids = expected_ids - live_ids
+        if not missing_ids:
+            return
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="stickon-save-restore-", suffix=".sti", delete=False) as tf:
+                tmp_path = Path(tf.name)
+            save_pur(tmp_path, manifest, blobs)
+            load_scene_from_path(scene, tmp_path)
+        except (OSError, ValueError):
+            return
+        finally:
+            if tmp_path is not None:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def _on_post_save_scene_guard_tick(self) -> None:
+        if not self._post_save_layer_snapshot:
+            self._disarm_post_save_scene_guard()
+            return
+        now = int(QDateTime.currentMSecsSinceEpoch())
+        self._restore_layers_from_snapshot_if_missing(self._post_save_layer_snapshot)
+        if now >= self._post_save_scene_guard_deadline:
+            self._disarm_post_save_scene_guard()
+
+    def _on_post_save_manifest_guard_tick(self) -> None:
+        if self._post_save_manifest_snapshot is None or self._post_save_blobs_snapshot is None:
+            self._disarm_post_save_manifest_guard()
+            return
+        now = int(QDateTime.currentMSecsSinceEpoch())
+        self._restore_scene_from_manifest_snapshot_if_wiped()
+        if now >= self._post_save_manifest_guard_deadline:
+            self._disarm_post_save_manifest_guard()

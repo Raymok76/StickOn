@@ -60,6 +60,8 @@ class DraggableTitleBar(QWidget):
         self,
         host_window: QWidget,
         segment_widgets: list[QWidget],
+        *,
+        trailing_widgets: list[QWidget] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -77,6 +79,11 @@ class DraggableTitleBar(QWidget):
             lay.addWidget(w)
 
         lay.addStretch(1)
+
+        trailing_align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+        for w in trailing_widgets or []:
+            w.setParent(self)
+            lay.addWidget(w, alignment=trailing_align)
 
         self._max_btn = QPushButton(self)
         self._max_btn.setObjectName("stickon_maximize")

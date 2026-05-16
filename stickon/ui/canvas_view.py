@@ -227,6 +227,24 @@ class CanvasView(QGraphicsView):
         self.viewport().unsetCursor()
         super().leaveEvent(event)
 
+    def reset_pointer_interaction_state(self) -> None:
+        """Clear in-progress manipulation targets (e.g. after clearing the scene)."""
+        self._gesture = _Gesture.none
+        self._rotate_item = None
+        self._scale_item = None
+        self._crop_item = None
+        self._resize_item = None
+        self._draw_path = None
+        self._draw_item = None
+        self._erase_removed_batch.clear()
+        self._history_capture_before = None
+        self._history_capture_label = None
+        if self._saved_view_drag_mode is not None:
+            self.setDragMode(self._saved_view_drag_mode)
+            self._saved_view_drag_mode = None
+        self._pause_effect_for_default_drag = False
+        self._set_live_scene_effect_paused(False)
+
     def _set_live_scene_effect_paused(self, _paused: bool) -> None:
         """Reserved for pausing heavy effects during drags (currently unused)."""
         pass
@@ -1296,18 +1314,16 @@ class CanvasView(QGraphicsView):
 
     def keyPressEvent(self, event) -> None:
         k = event.key()
-        if k == Qt.Key_Delete:
-            selected_images = [
-                it for it in self._scene.selectedItems() if isinstance(it, ImageNodeItem)
-            ]
-            selected_notes = [it for it in self._scene.selectedItems() if isinstance(it, NoteNodeItem)]
-            if selected_images or selected_notes:
-                for it in selected_images:
-                    it.set_gif_movie(None)
-                    self._scene.removeItem(it)
-                for it in selected_notes:
-                    it.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-                    self._scene.removeItem(it)
+        if k == Qt.Key_Delete and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            # Delegate to main window so Delete uses one code path and undo; avoids
+            # native dialogs returning focus with a stray Delete wiping the selection.
+            host = self.window()
+            suppress = getattr(host, "delete_shortcuts_suppressed", None)
+            if callable(suppress) and suppress():
+                event.accept()
+                return
+            handler = getattr(host, "_delete_selected_with_history", None)
+            if callable(handler) and handler():
                 event.accept()
                 return
         if k == Qt.Key_C and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):

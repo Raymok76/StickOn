@@ -21,6 +21,12 @@ class HistoryManager:
         self._undo.clear()
         self._redo.clear()
 
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
     def push(self, entry: HistoryEntry) -> None:
         self._undo.append(entry)
         if len(self._undo) > self._max:
