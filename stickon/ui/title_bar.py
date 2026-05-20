@@ -54,7 +54,7 @@ class ToggleChipLabel(QLabel):
 
 
 class DraggableTitleBar(QWidget):
-    """Frameless-window drag region + maximize + close; toggle chips."""
+    """Frameless-window drag region + minimize + maximize + close; toggle chips."""
 
     def __init__(
         self,
@@ -85,6 +85,19 @@ class DraggableTitleBar(QWidget):
             w.setParent(self)
             lay.addWidget(w, alignment=trailing_align)
 
+        btn_align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+
+        self._min_btn = QPushButton(self)
+        self._min_btn.setObjectName("stickon_minimize")
+        self._min_btn.setFixedSize(28, 28)
+        self._min_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._min_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._min_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._min_btn.setIcon(
+            self._host.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMinButton)
+        )
+        self._min_btn.clicked.connect(self._on_minimize_clicked)
+
         self._max_btn = QPushButton(self)
         self._max_btn.setObjectName("stickon_maximize")
         self._max_btn.setFixedSize(28, 28)
@@ -101,14 +114,19 @@ class DraggableTitleBar(QWidget):
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         close_btn.clicked.connect(host_window.close)
-        lay.addWidget(self._max_btn, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
-        lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(self._min_btn, alignment=btn_align)
+        lay.addWidget(self._max_btn, alignment=btn_align)
+        lay.addWidget(close_btn, alignment=btn_align)
 
         self.setMinimumHeight(0)
         self.setMaximumHeight(34)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         self.setStyleSheet(
             f"DraggableTitleBar {{ background-color: {_BAR_BG}; border-bottom: 1px solid #c0c0c0; }}"
+            "QPushButton#stickon_minimize { border: 1px solid white; border-radius: 4px; "
+            "background: transparent; padding: 0; }"
+            "QPushButton#stickon_minimize:hover { background-color: #d0d0d0; border: 1px solid white; }"
+            "QPushButton#stickon_minimize:pressed { background-color: #b0b0b0; border: 1px solid white; }"
             "QPushButton#stickon_maximize { border: 1px solid white; border-radius: 4px; "
             "background: transparent; padding: 0; }"
             "QPushButton#stickon_maximize:hover { background-color: #d0d0d0; border: 1px solid white; }"
@@ -118,6 +136,13 @@ class DraggableTitleBar(QWidget):
             "QPushButton#stickon_close:hover { background-color: #d0d0d0; color: #000; border: 1px solid white; }"
             "QPushButton#stickon_close:pressed { background-color: #b0b0b0; border: 1px solid white; }"
         )
+
+    def _on_minimize_clicked(self) -> None:
+        fn = getattr(self._host, "_minimize_stickon_window", None)
+        if callable(fn):
+            fn()
+        else:
+            self._host.showMinimized()
 
     def _on_maximize_clicked(self) -> None:
         fn = getattr(self._host, "_toggle_stickon_maximize", None)

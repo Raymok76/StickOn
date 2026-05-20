@@ -76,6 +76,7 @@ Export scene or selection (`Ctrl+E`, `Ctrl+Shift+I`) writes **PNG, JPEG, or BMP*
 - `Overlay Selection` (`Ctrl+O`): Makes the canvas background transparent and opens a borderless, always-on-top window per **selected** image, as large as possible within the current screen’s available (work) area. Focus stays on the StickOn canvas so `Escape` or other shortcuts work immediately. With overlays open, `Escape` or `Ctrl+O` closes them and restores the canvas.
 - `Application Opacity` (`Ctrl+Shift++` or `Ctrl+Wheel Up` / `Ctrl+Shift+-` or `Ctrl+Wheel down`): Adjusts the alpha transparency of the entire application window against the Windows desktop.
 - `Lock Window` (`Ctrl+W`): Freezes the window coordinates on the monitor to prevent accidental movement.
+- `Minimize Window` (`Ctrl+M`): Sends StickOn to the taskbar. Use the title bar **−** button (left of maximize) or rebind via **Command Key** (`Ctrl+Shift+P`).
 
 ### Alignments
 - `Pack Optimal` (`Ctrl+P`): Algorithmic spatial packing of selected image nodes to eliminate empty space.

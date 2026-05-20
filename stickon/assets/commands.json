@@ -8,6 +8,7 @@
     {"id": "window.opacity_down", "title": "Opacity Down", "shortcut": "Ctrl+Shift+-", "enabled_when": "always"},
     {"id": "window.click_through", "title": "Click Through", "shortcut": "Ctrl+T", "enabled_when": "always"},
     {"id": "window.lock", "title": "Lock Window Position", "shortcut": "Ctrl+W", "enabled_when": "always"},
+    {"id": "window.minimize", "title": "Minimize Window", "shortcut": "Ctrl+M", "enabled_when": "always"},
     {"id": "window.click_through_off", "title": "Disable Click-Through (recover)", "shortcut": "Escape", "enabled_when": "always"},
     {"id": "window.fit_content", "title": "Fit Window to Content", "shortcut": "Ctrl+Shift+F", "enabled_when": "always"},
     {"id": "scene.clear_all", "title": "Clear All", "shortcut": "Ctrl+Shift+X", "enabled_when": "always"},

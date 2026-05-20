@@ -589,6 +589,9 @@ class MainWindow(QMainWindow):
             self._stickon_maximized = True
         self._title_bar.set_maximized_visual(self._stickon_maximized)
 
+    def _minimize_stickon_window(self) -> None:
+        self.showMinimized()
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._resize_active:
             self._continue_window_resize(event.globalPosition().toPoint())
@@ -778,6 +781,7 @@ class MainWindow(QMainWindow):
             lambda ctx: self._win_state.toggle_lock_position(),
             is_checked=lambda: self._win_state.lock_position,
         )
+        reg("window.minimize", lambda ctx: self._minimize_stickon_window())
         reg("window.click_through_off", lambda ctx: self._win_state.set_click_through(False))
         reg("window.fit_content", lambda ctx: self._on_fit_content_clicked())
         reg("scene.clear_all", lambda ctx: self._on_clear_all_clicked())
