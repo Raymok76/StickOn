@@ -24,7 +24,7 @@ from PySide6.QtGui import (
     QTransform,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
+from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView, QMessageBox
 
 from stickon.scene.items.draw_item import DrawNodeItem
 from stickon.scene.items.group_item import GroupNodeItem
@@ -32,9 +32,17 @@ from stickon.scene.items.image_item import ImageNodeItem
 from stickon.scene.items.note_item import NoteNodeItem
 from stickon.services.image_io import (
     can_import_image_path,
+    estimate_pdf_import,
     is_gif_path,
+    is_pdf_path,
     load_gif_poster_pixmap,
+    load_pdf_pixmaps,
     load_still_pixmap,
+    pdf_import_needs_memory_warning,
+    pdf_import_warning_message,
+    pdf_is_password_protected,
+    pdf_password_protected_message,
+    pdf_source_path,
 )
 from stickon.services.project_service import sample_color_at_global
 
@@ -587,11 +595,11 @@ class CanvasView(QGraphicsView):
             for url in mime.urls():
                 path = Path(url.toLocalFile())
                 if can_import_image_path(path):
-                    it = self.add_image_from_path(str(path), cur)
-                    if it is not None:
-                        added.append(it)
+                    new_items = self.add_image_from_path(str(path), cur)
+                    if new_items:
+                        added.extend(new_items)
+                        cur += step * len(new_items)
                     handled = True
-                    cur += step
         if not handled:
             pm = _pixmap_from_mimedata(mime)
             if pm is not None and not pm.isNull():
@@ -605,9 +613,9 @@ class CanvasView(QGraphicsView):
             t = mime.text().strip().strip('"')
             p = Path(t)
             if can_import_image_path(p):
-                it = self.add_image_from_path(str(p), cur)
-                if it is not None:
-                    added.append(it)
+                new_items = self.add_image_from_path(str(p), cur)
+                if new_items:
+                    added.extend(new_items)
                     handled = True
         if not handled and clipboard is not None:
             img = clipboard.image()
@@ -1328,28 +1336,88 @@ class CanvasView(QGraphicsView):
             self._commit_history_capture()
         super().mouseReleaseEvent(event)
 
-    def add_image_from_path(self, path_str: str, at: QPointF | None = None) -> ImageNodeItem | None:
+    def _confirm_large_pdf_import(self, path: Path) -> bool:
+        estimate = estimate_pdf_import(path)
+        if estimate is None or not pdf_import_needs_memory_warning(estimate):
+            return True
+        parent = self.window() or self
+        reply = QMessageBox.question(
+            parent,
+            "Large PDF import",
+            pdf_import_warning_message(estimate, path),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _import_pdf_pages(
+        self,
+        pdf_path: Path,
+        source_path: Path,
+        at: QPointF,
+    ) -> list[ImageNodeItem]:
+        if pdf_is_password_protected(pdf_path):
+            QMessageBox.warning(
+                self.window() or self,
+                "PDF import",
+                pdf_password_protected_message(pdf_path),
+            )
+            return []
+        if not self._confirm_large_pdf_import(pdf_path):
+            return []
+        pages = load_pdf_pixmaps(pdf_path)
+        if not pages:
+            return []
+        step = QPointF(24, 24)
+        cur = at
+        created: list[ImageNodeItem] = []
+        for i, pm in enumerate(pages):
+            it = ImageNodeItem(pm, None)
+            it.source_path = pdf_source_path(source_path, i)
+            it.setPos(cur)
+            self._scene.addItem(it)
+            self._stack_new_image(it)
+            created.append(it)
+            cur += step
+        return created
+
+    def add_image_from_path(
+        self, path_str: str, at: QPointF | None = None
+    ) -> list[ImageNodeItem]:
         path = Path(path_str)
         if not can_import_image_path(path):
-            return None
+            return []
         if at is None:
             at = self.mapToScene(self.viewport().rect().center())
+        step = QPointF(24, 24)
+        cur = at
+        created: list[ImageNodeItem] = []
+
         if is_gif_path(path):
             pm = load_gif_poster_pixmap(path)
             it = ImageNodeItem(pm, None)
             it.source_path = str(path)
             it.set_gif_movie(QMovie(str(path), parent=self))
+            it.setPos(cur)
+            self._scene.addItem(it)
+            self._stack_new_image(it)
+            created.append(it)
+        elif is_pdf_path(path):
+            created.extend(self._import_pdf_pages(path, path, at))
         else:
             pm = load_still_pixmap(path)
             if pm is None:
-                return None
+                return []
             it = ImageNodeItem(pm, None)
             it.source_path = str(path)
-        it.setPos(at)
-        self._scene.addItem(it)
-        self._stack_new_image(it)
-        self.ensure_notes_above_images()
-        return it
+            it.setPos(cur)
+            self._scene.addItem(it)
+            self._stack_new_image(it)
+            created.append(it)
+
+        if created:
+            self.ensure_notes_above_images()
+        return created
 
     def keyPressEvent(self, event) -> None:
         k = event.key()

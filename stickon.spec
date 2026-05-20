@@ -106,6 +106,7 @@ a = Analysis(
         "pillow_heif",
         "pillow_heif._libheif_cffi",
         "_cffi_backend",
+        "PySide6.QtPdf",
     ],
     hookspath=[],
     hooksconfig={},

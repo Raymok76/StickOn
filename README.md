@@ -34,9 +34,12 @@ Drawing mode, scene export, undo/redo, and GIF playback controls round out the w
 | **Modern still** | `.avif`, `.avifs`, `.heic`, `.heif`, `.hif`, `.jxl`, `.jp2`, `.j2k`, `.jpc`, `.jpx`, `.qoi` |
 | **Netpbm / similar** | `.pbm`, `.pgm`, `.ppm`, `.pnm`, `.pam`, `.pfm` |
 | **Design / 3D** | `.psd`, `.psb`, `.svg`, `.svgz`, `.tga`, `.dds`, `.exr` |
+| **Documents** | `.pdf` (each page becomes its own reference image) |
 | **Camera RAW** | `.arw`, `.cr2`, `.cr3`, `.dng`, `.nef`, `.nrw`, `.orf`, `.raf`, `.rw2`, `.raw`, `.srw` |
 
 **Animated GIF** (`.gif`) is supported with playback controls (pause, frame step, and related shortcuts)—not treated as a single still frame unless you extract one.
+
+**PDF** (`.pdf`) — drag or paste a file path to import **all pages** as separate images (rasterized via Qt PDF). **Password-protected** PDFs cannot be imported; StickOn shows a message and skips the file. If the estimated memory use is high (about **200 MB** of image data or more), StickOn asks **Yes / No** before importing (**No** is the default).
 
 If an extension is not listed but Qt or Pillow can still decode the file, import may work anyway.
 
@@ -56,6 +59,7 @@ If an extension is not listed but Qt or Pillow can still decode the file, import
 | **Camera RAW** (`.cr2`, `.nef`, `.dng`, etc.) | Highly **camera- and codec-dependent**. Many RAW files will not open on Windows unless the right codecs or libraries are installed; convert to TIFF/PNG for reliable refs. |
 | **ICO / CUR** (`.ico`, `.cur`) | Multi-resolution icons use one decoded size; very large icon files are uncommon edge cases. |
 | **Large GIFs** | May load but can be **slow** or memory-heavy during playback. |
+| **PDF** (`.pdf`) | Large or scanned PDFs can be **slow** and memory-heavy (every page is rasterized). Encrypted/password PDFs fail. Very wide pages are capped at 4096 px on the long edge. |
 
 ### Not supported as reference media
 
