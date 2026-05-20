@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
@@ -66,6 +66,24 @@ def _render_selected_items_non_mutating(
     return image
 
 
+def _without_selection_chrome(
+    items: Sequence[QGraphicsItem],
+    render: Callable[[], QImage],
+) -> QImage:
+    """Temporarily deselect items so export paint skips handles and dashed frames."""
+    saved_selection = {it: it.isSelected() for it in items}
+    for it in items:
+        if isinstance(it, NoteNodeItem):
+            it.finalize_text_edit_visual()
+        it.setSelected(False)
+    try:
+        return render()
+    finally:
+        for it, was_sel in saved_selection.items():
+            if was_sel:
+                it.setSelected(True)
+
+
 class ExportService:
     @staticmethod
     def _format_from_suffix(suffix: str) -> tuple[str, bool]:
@@ -115,16 +133,21 @@ class ExportService:
         ordered = _collect_items_for_selection_export(scene, roots)
         if not ordered:
             return
-        united = ordered[0].sceneBoundingRect()
-        for it in ordered[1:]:
-            united = united.united(it.sceneBoundingRect())
-        target = united.adjusted(-10, -10, 10, 10)
-        fmt, opaque = ExportService._format_from_suffix(path.suffix)
-        image = _render_selected_items_non_mutating(
-            target,
-            ordered,
-            opaque_background=opaque,
-        )
+
+        def _render() -> QImage:
+            united = ordered[0].sceneBoundingRect()
+            for it in ordered[1:]:
+                united = united.united(it.sceneBoundingRect())
+            target = united.adjusted(-10, -10, 10, 10)
+            fmt, opaque = ExportService._format_from_suffix(path.suffix)
+            return _render_selected_items_non_mutating(
+                target,
+                ordered,
+                opaque_background=opaque,
+            )
+
+        image = _without_selection_chrome(ordered, _render)
+        fmt, _opaque = ExportService._format_from_suffix(path.suffix)
         path.parent.mkdir(parents=True, exist_ok=True)
         if fmt == "JPEG":
             image.save(str(path), "JPEG", 92)

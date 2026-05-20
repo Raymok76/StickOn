@@ -582,6 +582,7 @@ class CanvasView(QGraphicsView):
                 it = ImageNodeItem(pm, None)
                 it.setPos(cur)
                 self._scene.addItem(it)
+                self._stack_new_image(it)
                 added.append(it)
                 handled = True
         if not handled and mime.hasText():
@@ -600,7 +601,10 @@ class CanvasView(QGraphicsView):
                     it = ImageNodeItem(pm, None)
                     it.setPos(cur)
                     self._scene.addItem(it)
+                    self._stack_new_image(it)
                     added.append(it)
+        if added:
+            self.ensure_notes_above_images()
         self.finalize_new_images(before, added)
         gifs_drop = tuple(it for it in added if it._movie is not None and it.source_path)
         if gifs_drop:
@@ -839,17 +843,40 @@ class CanvasView(QGraphicsView):
     _IMAGE_Z_STEP = 1.0
 
     def ensure_notes_above_images(self) -> None:
-        """Keep every note above every image (text layer wins)."""
-        notes = [x for x in self._scene.items() if isinstance(x, NoteNodeItem)]
+        """Keep notes and draw layers above every image (text/draw win)."""
+        overlays = [
+            x
+            for x in self._scene.items()
+            if isinstance(x, (NoteNodeItem, DrawNodeItem))
+        ]
         imgs = [x for x in self._scene.items() if isinstance(x, ImageNodeItem)]
-        if not notes or not imgs:
+        if not overlays or not imgs:
             return
         max_img = max(i.zValue() for i in imgs)
-        min_note = min(n.zValue() for n in notes)
-        if min_note <= max_img:
-            shift = max_img - min_note + self._IMAGE_Z_STEP
-            for n in notes:
-                n.setZValue(n.zValue() + shift)
+        min_overlay = min(x.zValue() for x in overlays)
+        if min_overlay <= max_img:
+            shift = max_img - min_overlay + self._IMAGE_Z_STEP
+            for x in overlays:
+                x.setZValue(x.zValue() + shift)
+
+    def _stack_new_image(self, it: ImageNodeItem) -> None:
+        """Place a newly added image above other images, below notes and draw layers."""
+        imgs = [
+            x for x in self._scene.items() if isinstance(x, ImageNodeItem) and x is not it
+        ]
+        z = max((x.zValue() for x in imgs), default=0.0) + self._IMAGE_Z_STEP
+        overlays = [
+            x
+            for x in self._scene.items()
+            if isinstance(x, (NoteNodeItem, DrawNodeItem))
+        ]
+        if overlays:
+            min_overlay = min(x.zValue() for x in overlays)
+            if z >= min_overlay:
+                shift = z - min_overlay + self._IMAGE_Z_STEP
+                for x in overlays:
+                    x.setZValue(x.zValue() + shift)
+        it.setZValue(z)
 
     def _hit_image_overlay_controls(self, it: ImageNodeItem, view_pos: QPointF) -> str | None:
         lp = it.mapFromScene(self.mapToScene(view_pos.toPoint()))
@@ -1309,6 +1336,7 @@ class CanvasView(QGraphicsView):
             it.source_path = str(path)
         it.setPos(at)
         self._scene.addItem(it)
+        self._stack_new_image(it)
         self.ensure_notes_above_images()
         return it
 
