@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "StickOn — infinite-canvas reference board (PySide6)"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["PySide6>=6.6"]
+dependencies = ["PySide6>=6.6", "pillow>=10.0", "pillow-heif>=0.21.0"]
 
 [build-system]
 requires = ["hatchling>=1.24.0"]

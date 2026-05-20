@@ -30,6 +30,12 @@ from stickon.scene.items.draw_item import DrawNodeItem
 from stickon.scene.items.group_item import GroupNodeItem
 from stickon.scene.items.image_item import ImageNodeItem
 from stickon.scene.items.note_item import NoteNodeItem
+from stickon.services.image_io import (
+    can_import_image_path,
+    is_gif_path,
+    load_gif_poster_pixmap,
+    load_still_pixmap,
+)
 from stickon.services.project_service import sample_color_at_global
 
 # Clipboard / drag payloads on Windows often expose PNG/JPEG bytes without hasImage().
@@ -50,10 +56,20 @@ _KNOWN_RASTER_MIME_TYPES = frozenset(
 )
 
 
+def _mime_has_importable_image_urls(mime: QMimeData) -> bool:
+    for url in mime.urls():
+        path = Path(url.toLocalFile())
+        if can_import_image_path(path):
+            return True
+    return False
+
+
 def _mime_data_contains_raster(mime: QMimeData | None) -> bool:
     if mime is None:
         return False
-    if mime.hasUrls() or mime.hasImage():
+    if mime.hasImage():
+        return True
+    if mime.hasUrls() and _mime_has_importable_image_urls(mime):
         return True
     for fmt in mime.formats():
         low = fmt.lower()
@@ -570,7 +586,7 @@ class CanvasView(QGraphicsView):
         if mime.hasUrls():
             for url in mime.urls():
                 path = Path(url.toLocalFile())
-                if path.is_file():
+                if can_import_image_path(path):
                     it = self.add_image_from_path(str(path), cur)
                     if it is not None:
                         added.append(it)
@@ -588,7 +604,7 @@ class CanvasView(QGraphicsView):
         if not handled and mime.hasText():
             t = mime.text().strip().strip('"')
             p = Path(t)
-            if p.is_file():
+            if can_import_image_path(p):
                 it = self.add_image_from_path(str(p), cur)
                 if it is not None:
                     added.append(it)
@@ -1314,23 +1330,18 @@ class CanvasView(QGraphicsView):
 
     def add_image_from_path(self, path_str: str, at: QPointF | None = None) -> ImageNodeItem | None:
         path = Path(path_str)
-        if not path.is_file():
+        if not can_import_image_path(path):
             return None
         if at is None:
             at = self.mapToScene(self.viewport().rect().center())
-        suffix = path.suffix.lower()
-        if suffix == ".gif":
-            reader = QImageReader(str(path))
-            first_img = reader.read()
-            pm = QPixmap.fromImage(first_img) if not first_img.isNull() else QPixmap(32, 32)
-            if pm.isNull() or pm.width() < 2:
-                pm = QPixmap(32, 32)
+        if is_gif_path(path):
+            pm = load_gif_poster_pixmap(path)
             it = ImageNodeItem(pm, None)
             it.source_path = str(path)
             it.set_gif_movie(QMovie(str(path), parent=self))
         else:
-            pm = QPixmap(str(path))
-            if pm.isNull():
+            pm = load_still_pixmap(path)
+            if pm is None:
                 return None
             it = ImageNodeItem(pm, None)
             it.source_path = str(path)

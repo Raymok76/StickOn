@@ -102,7 +102,11 @@ a = Analysis(
     pathex=[str(SPEC_ROOT)],
     binaries=[],
     datas=[(str(SPEC_ROOT / "stickon" / "assets"), "stickon/assets")],
-    hiddenimports=[],
+    hiddenimports=[
+        "pillow_heif",
+        "pillow_heif._libheif_cffi",
+        "_cffi_backend",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

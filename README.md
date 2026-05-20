@@ -23,6 +23,51 @@ Built with **PySide6 (Qt 6)** and installed as a small Python package so you can
 
 Drawing mode, scene export, undo/redo, and GIF playback controls round out the workflow for quick visual references—not a full image editor, but a fast overlay for design, 3D, coding, or teaching side-by-side with another window.
 
+---
+
+## Supported image formats
+
+| Group | Extensions |
+|-------|------------|
+| **Common** | `.png`, `.jpg`, `.jpeg`, `.jfif`, `.bmp`, `.dib`, `.gif`, `.webp`, `.tif`, `.tiff` |
+| **Icons & portable** | `.ico`, `.cur`, `.xbm`, `.xpm` |
+| **Modern still** | `.avif`, `.avifs`, `.heic`, `.heif`, `.hif`, `.jxl`, `.jp2`, `.j2k`, `.jpc`, `.jpx`, `.qoi` |
+| **Netpbm / similar** | `.pbm`, `.pgm`, `.ppm`, `.pnm`, `.pam`, `.pfm` |
+| **Design / 3D** | `.psd`, `.psb`, `.svg`, `.svgz`, `.tga`, `.dds`, `.exr` |
+| **Camera RAW** | `.arw`, `.cr2`, `.cr3`, `.dng`, `.nef`, `.nrw`, `.orf`, `.raf`, `.rw2`, `.raw`, `.srw` |
+
+**Animated GIF** (`.gif`) is supported with playback controls (pause, frame step, and related shortcuts)—not treated as a single still frame unless you extract one.
+
+If an extension is not listed but Qt or Pillow can still decode the file, import may work anyway.
+
+**HEIC / HEIF** (`.heic`, `.heif`, `.hif`) — StickOn bundles **pillow-heif** and **libheif** with the app (no separate Windows codec install). Phone and camera exports should open after drag-and-drop or paste of a file path. Very old or unusual HEIF variants may still fail.
+
+### Formats that may fail or look wrong on import
+
+| Format | What to expect |
+|--------|----------------|
+| **AVIF** (`.avif`, `.avifs`) | Usually works on recent Pillow builds; older installs or unusual encodes may fail. |
+| **JPEG 2000** (`.jp2`, `.j2k`, `.jpc`, `.jpx`) | Pillow-only path; depends on optional codecs being available. |
+| **JPEG XL** (`.jxl`) | Pillow-only; support varies by Pillow version and build. |
+| **PSD / PSB** (`.psd`, `.psb`) | Typically opens a **flattened** composite, not full layer editing. Large or complex files can be slow or fail. |
+| **SVG / SVGZ** (`.svg`, `.svgz`) | Loaded as a **raster** preview (Qt), not as editable vectors. Dense or unusual SVGs may fail or look soft when scaled. |
+| **EXR** (`.exr`) | Limited decoder support; HDR tone may look wrong compared to a dedicated EXR viewer. |
+| **DDS** (`.dds`) | Some compression types work; others are rejected by the decoder. |
+| **Camera RAW** (`.cr2`, `.nef`, `.dng`, etc.) | Highly **camera- and codec-dependent**. Many RAW files will not open on Windows unless the right codecs or libraries are installed; convert to TIFF/PNG for reliable refs. |
+| **ICO / CUR** (`.ico`, `.cur`) | Multi-resolution icons use one decoded size; very large icon files are uncommon edge cases. |
+| **Large GIFs** | May load but can be **slow** or memory-heavy during playback. |
+
+### Not supported as reference media
+
+- **Video** — `.mp4`, `.mov`, `.webm`, `.mkv`, and similar are **not** imported (use animated GIF for motion on the board).
+- **YouTube / streaming URLs** — not supported.
+
+### Export (save out from StickOn)
+
+Export scene or selection (`Ctrl+E`, `Ctrl+Shift+I`) writes **PNG, JPEG, or BMP** only. Importing a PSD, AVIF, or RAW does not mean you can export back to that same format from StickOn.
+
+---
+
 ## Main Functions and Hotkeys
 
 - `Always on Top` (`Ctrl+Shift+A`): Modifies the z-order to force the application to render above all other active Windows applications.

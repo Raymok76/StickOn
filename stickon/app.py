@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from stickon.services.image_io import ensure_image_plugins
 from stickon.ui.main_window import MainWindow
 
 _ICO_DIMS = re.compile(r"^(\d+)x(\d+)", re.I)
@@ -83,6 +84,7 @@ class StickOnApplication:
 
 
 def run_app(argv: Sequence[str] | None = None) -> int:
+    ensure_image_plugins()
     args = argv if argv is not None else sys.argv
     app, window = StickOnApplication.build(args)
     window.show()
