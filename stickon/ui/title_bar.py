@@ -18,29 +18,55 @@ class ToggleChipLabel(QLabel):
         self,
         on_toggle: Callable[[], None],
         *,
-        active_on_color: str = "#d6ebff",
+        off_color: str = _BAR_BG,
+        on_color: str = "#d6ebff",
+        off_text_color: str = "#333",
+        on_text_color: str = "#ffffff",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_toggle = on_toggle
-        self._active_on_color = active_on_color
+        self._off_color = off_color
+        self._on_color = on_color
+        self._off_text_color = off_text_color
+        self._on_text_color = on_text_color
+        self._full_text = ""
+        self._compact_text = ""
+        self._compact = False
+        self._active = False
         self.setWordWrap(False)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+    def configure_labels(self, full: str, compact: str) -> None:
+        self._full_text = full
+        self._compact_text = compact
+        self.setToolTip(full)
+        self.set_compact_mode(self._compact)
+
+    def set_compact_mode(self, compact: bool) -> None:
+        self._compact = compact
+        self.setText(self._compact_text if compact else self._full_text)
+        self.set_active(self._active)
+
+    def natural_width(self) -> int:
+        fm = self.fontMetrics()
+        return fm.horizontalAdvance(self._full_text) + 24 + 2
+
     def set_active(self, active: bool) -> None:
+        self._active = active
         r = _CHIP_RADIUS
-        pv, ph = 4, 12
+        pv = 4
+        ph = 6 if self._compact else 12
         if active:
-            c = self._active_on_color
-            self.setStyleSheet(
-                f"background-color: {c}; border: 1px solid {c}; "
-                f"border-radius: {r}px; padding: {pv}px {ph}px; color: #1a1a1a;"
-            )
+            bg = self._on_color
+            fg = self._on_text_color
         else:
-            self.setStyleSheet(
-                f"background-color: {_BAR_BG}; border: 1px solid white; "
-                f"border-radius: {r}px; padding: {pv}px {ph}px; color: #333;"
-            )
+            bg = self._off_color
+            fg = self._off_text_color
+        self.setStyleSheet(
+            f"background-color: {bg}; border: 1px solid {bg}; "
+            f"border-radius: {r}px; padding: {pv}px {ph}px; color: {fg};"
+        )
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         event.accept()
@@ -136,6 +162,15 @@ class DraggableTitleBar(QWidget):
             "QPushButton#stickon_close:hover { background-color: #d0d0d0; color: #000; border: 1px solid white; }"
             "QPushButton#stickon_close:pressed { background-color: #b0b0b0; border: 1px solid white; }"
         )
+
+    def available_segment_width(self) -> int:
+        lay = self.layout()
+        if lay is None:
+            return self.width()
+        m = lay.contentsMargins()
+        spacing = lay.spacing()
+        reserved = m.left() + m.right() + spacing * 6 + 28 * 3
+        return max(0, self.width() - reserved)
 
     def _on_minimize_clicked(self) -> None:
         fn = getattr(self._host, "_minimize_stickon_window", None)

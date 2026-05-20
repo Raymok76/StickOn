@@ -43,7 +43,6 @@ def set_clickthrough(hwnd: int, enabled: bool) -> None:
     style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     if enabled:
         style |= WS_EX_LAYERED
-        style |= WS_EX_TRANSPARENT
     else:
         style &= ~WS_EX_TRANSPARENT
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)

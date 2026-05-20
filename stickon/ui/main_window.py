@@ -38,6 +38,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPixmap,
+    QResizeEvent,
     QShowEvent,
     QTransform,
 )
@@ -119,6 +120,9 @@ _CONTEXT_MENU_GIF_IDS_ORDER = (
 _CONTEXT_MENU_GIF_IDS = frozenset(_CONTEXT_MENU_GIF_IDS_ORDER)
 
 _FIT_SIZE_SETTLE_PASSES = 3
+
+_FIT_CONTENT_LABEL = "Fit content"
+_FIT_CONTENT_COMPACT_LABEL = "Fit"
 
 
 _CONTEXT_MENU_EXCLUDE_IDS = frozenset(
@@ -240,43 +244,30 @@ class MainWindow(QMainWindow):
 
         self._seg_lock = ToggleChipLabel(
             lambda: self._toggle_lock_from_bar(),
-            active_on_color="#c7dbff",
+            off_color="#c7dbff",
+            on_color="#0078d4",
             parent=root,
         )
-        self._seg_lock.setText("Position lock")
+        self._seg_lock.configure_labels("Position lock", "Pos")
         self._seg_through = ToggleChipLabel(
             lambda: self._toggle_click_through_from_bar(),
-            active_on_color="#ffd4b8",
+            off_color="#ffd4b8",
+            on_color="#e85d04",
             parent=root,
         )
-        self._seg_through.setText("Click-through")
-        self._btn_fit_content = QPushButton("Fit content", root)
+        self._seg_through.configure_labels("Click-through", "Click")
+        self._btn_fit_content = QPushButton(_FIT_CONTENT_LABEL, root)
         self._btn_fit_content.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_fit_content.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_fit_content.setToolTip(_FIT_CONTENT_LABEL)
         self._btn_fit_content.clicked.connect(self._on_fit_content_clicked)
-        r = _CHIP_RADIUS
-        self._btn_fit_content.setStyleSheet(
-            f"QPushButton {{ background-color: {_BAR_BG}; border: 1px solid white; "
-            f"border-radius: {r}px; padding: 4px 12px; color: #333; }}"
-            f"QPushButton:hover {{ background-color: #d8f0e4; }}"
-            f"QPushButton:pressed {{ background-color: #c6f0d6; border: 1px solid white; }}"
-        )
-        self._btn_clear_all = QPushButton("Clear all", root)
-        self._btn_clear_all.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn_clear_all.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_clear_all.clicked.connect(self._on_clear_all_clicked)
-        self._btn_clear_all.setStyleSheet(
-            f"QPushButton {{ background-color: {_BAR_BG}; border: 1px solid white; "
-            f"border-radius: {r}px; padding: 4px 12px; color: #333; }}"
-            f"QPushButton:hover {{ background-color: #ffe0e0; }}"
-            f"QPushButton:pressed {{ background-color: #ffcccc; border: 1px solid white; }}"
-        )
+        self._title_bar_compact = False
+        self._apply_fit_content_bar_style(compact=False)
         self._stickon_maximized = False
         self._geom_before_stickon_max = QRect()
         self._title_bar = DraggableTitleBar(
             self,
             [self._seg_lock, self._seg_through, self._btn_fit_content],
-            trailing_widgets=[self._btn_clear_all],
             parent=root,
         )
         lay.addWidget(self._title_bar)
@@ -817,10 +808,52 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         self._win_state.sync_win32_topmost_from_state()
         self._refresh_status_labels()
+        QTimer.singleShot(0, self._refresh_title_bar_compact_mode)
         if self._schedule_fit_after_show:
             self._schedule_fit_window_to_content()
         else:
             self._apply_pending_view_state()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._refresh_title_bar_compact_mode()
+
+    def _fit_content_natural_width(self) -> int:
+        fm = self._btn_fit_content.fontMetrics()
+        return fm.horizontalAdvance(_FIT_CONTENT_LABEL) + 24 + 2
+
+    def _title_bar_segments_natural_width(self) -> int:
+        spacing = self._title_bar.layout().spacing() if self._title_bar.layout() else 0
+        return (
+            self._seg_lock.natural_width()
+            + self._seg_through.natural_width()
+            + self._fit_content_natural_width()
+            + spacing * 2
+        )
+
+    def _apply_fit_content_bar_style(self, *, compact: bool) -> None:
+        r = _CHIP_RADIUS
+        ph = 6 if compact else 12
+        self._btn_fit_content.setText(
+            _FIT_CONTENT_COMPACT_LABEL if compact else _FIT_CONTENT_LABEL
+        )
+        self._btn_fit_content.setStyleSheet(
+            f"QPushButton {{ background-color: {_BAR_BG}; border: 1px solid white; "
+            f"border-radius: {r}px; padding: 4px {ph}px; color: #333; }}"
+            f"QPushButton:hover {{ background-color: #d8f0e4; }}"
+            f"QPushButton:pressed {{ background-color: #c6f0d6; border: 1px solid white; }}"
+        )
+
+    def _refresh_title_bar_compact_mode(self) -> None:
+        available = self._title_bar.available_segment_width()
+        natural = self._title_bar_segments_natural_width()
+        compact = available < natural * 0.5
+        if compact == self._title_bar_compact:
+            return
+        self._title_bar_compact = compact
+        self._seg_lock.set_compact_mode(compact)
+        self._seg_through.set_compact_mode(compact)
+        self._apply_fit_content_bar_style(compact=compact)
 
     def _refresh_status_labels(self) -> None:
         self._seg_lock.set_active(self._win_state.lock_position)
@@ -852,7 +885,8 @@ class MainWindow(QMainWindow):
             self._clickthrough_hover_timer.stop()
 
         if desired_passthrough == self._clickthrough_passthrough_enabled:
-            return
+            if not self._win_state.click_through:
+                return
         set_clickthrough_passthrough(int(self.winId()), desired_passthrough)
         self._clickthrough_passthrough_enabled = desired_passthrough
 
@@ -1843,6 +1877,15 @@ class MainWindow(QMainWindow):
                 act.setEnabled(has_overlay_candidate)
             if cmd.id == "export.selection":
                 act.setEnabled(self._has_exportable_selection())
+                clear_cmd = next(
+                    (c for c in self._registry.all() if c.id == "scene.clear_all"), None
+                )
+                if clear_cmd is not None:
+                    clear_act = QAction(clear_cmd.title, self)
+                    clear_act.triggered.connect(
+                        lambda checked=False: self._execute("scene.clear_all")
+                    )
+                    menu.addAction(clear_act)
             if cmd.id == "edit.undo":
                 act.setEnabled(self._history.can_undo())
             if cmd.id == "edit.redo":
