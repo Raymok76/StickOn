@@ -660,7 +660,12 @@ class CanvasView(QGraphicsView):
         if isinstance(event, QDropEvent):
             if self.mime_accepts_external_drop(event.mimeData()):
                 pos = self.mapToScene(event.position().toPoint())
-                self.apply_drop_mime(event.mimeData(), pos)
+                added = self.apply_drop_mime(event.mimeData(), pos)
+                if added:
+                    host = self.window()
+                    record = getattr(host, "_push_paste_history", None)
+                    if callable(record):
+                        record(added, "import image")
                 event.acceptProposedAction()
                 return True
             return False

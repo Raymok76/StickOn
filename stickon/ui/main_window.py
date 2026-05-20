@@ -454,7 +454,9 @@ class MainWindow(QMainWindow):
             scene_pt = self._canvas.mapToScene(local_in_vp)
         else:
             scene_pt = self._canvas.mapToScene(self._canvas.viewport().rect().center())
-        self._canvas.apply_drop_mime(mime, scene_pt)
+        added = self._canvas.apply_drop_mime(mime, scene_pt)
+        if added:
+            self._push_paste_history(added, "import image")
         event.acceptProposedAction()
 
     def nativeEvent(self, eventType, message):
@@ -1688,16 +1690,10 @@ class MainWindow(QMainWindow):
         if mime is None:
             return
         scene = self._canvas.graphics_scene()
-        before_scene_items = set(scene.items())
         pos = self._canvas.mapToScene(self._canvas.viewport().rect().center())
-        self._canvas.apply_drop_mime(mime, pos, clipboard=cb)
-        pasted_images = [
-            it
-            for it in scene.items()
-            if isinstance(it, ImageNodeItem) and it not in before_scene_items
-        ]
-        if pasted_images:
-            self._push_paste_history(pasted_images, "paste image")
+        added = self._canvas.apply_drop_mime(mime, pos, clipboard=cb)
+        if added:
+            self._push_paste_history(added, "paste image")
             return
 
         if not mime.hasText():
@@ -1738,6 +1734,18 @@ class MainWindow(QMainWindow):
             for it in items
         ]
 
+        def undo() -> None:
+            for it, *_rest in snapshot:
+                try:
+                    if isinstance(it, NoteNodeItem):
+                        it.finalize_text_edit_visual()
+                    if isinstance(it, ImageNodeItem):
+                        it.set_gif_movie(None)
+                    if it.scene() is scene:
+                        scene.removeItem(it)
+                except RuntimeError:
+                    continue
+
         def redo() -> None:
             scene.clearSelection()
             for it, pos, rot, z, sc, origin, tr in snapshot:
@@ -1751,16 +1759,10 @@ class MainWindow(QMainWindow):
                     it.setRotation(rot)
                     it.setZValue(z)
                     it.setSelected(True)
-                except RuntimeError:
-                    continue
-
-        def undo() -> None:
-            for it, *_rest in snapshot:
-                try:
-                    if isinstance(it, NoteNodeItem):
-                        it.finalize_text_edit_visual()
-                    if it.scene() is scene:
-                        scene.removeItem(it)
+                    if isinstance(it, ImageNodeItem):
+                        sp = it.source_path
+                        if sp and Path(sp).suffix.lower() == ".gif":
+                            it.set_gif_movie(QMovie(str(sp), parent=self._canvas))
                 except RuntimeError:
                     continue
 
